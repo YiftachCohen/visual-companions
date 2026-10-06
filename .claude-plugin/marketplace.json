@@ -1,0 +1,6 @@
+{
+  "name": "visual-companions",
+  "owner": { "name": "Yiftach Cohen" },
+  "description": "Compact terminal visuals for Claude Code replies.",
+  "plugins": [{ "name": "visual-companions", "source": "./" }]
+}
