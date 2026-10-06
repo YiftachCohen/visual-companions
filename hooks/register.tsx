@@ -1,8 +1,11 @@
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
-import { booMood, cells, COLOR as BOO, COLUMNS, frameAt, ROWS } from './boo'
+import { big, booMood } from './boo'
+import type { Companion } from './boo'
+import { small } from './boo-small'
 import { cut, cutWords, draw, mood, split, w } from './render'
 import type { Line, Spec, Tone } from './render'
+import type { Now } from './contract'
 
 // Everything the model pays for is this section (cached with the system
 // prompt) plus the few dozen tokens of each ```viz block it writes.
@@ -17,20 +20,28 @@ const PANE = 'catchup'
 const KEEP = 20
 const STALE = 30 * 86_400_000 // other sessions' history is dropped after 30 days
 
+const NOW = { plugin: 'visual-companions', key: 'now' } as const
+
 type Saved = { at: number; title: string; mood: string; spec: Spec; stuck?: number } // stuck: ms blocked before this went green
 
 // ◆ (neutral) has no colour: it draws dim.
 const MOOD: Record<string, string | undefined> = { '✗': 'error', '◉': 'warning', '▼': 'warning', '✓': 'success' }
 const COLOR: Partial<Record<Tone, string>> = { ok: 'success', bad: 'error', warn: 'warning', data: 'suggestion', pick: 'claude' }
 
-export const register: Register = on => {
+const COMPANIONS: Record<string, Companion | undefined> = { small, big }
+
+export const register: Register = (on, options) => {
+  const companion = COMPANIONS[String(options.companion ?? 'small')] // undefined: off, the glyph line
   let open: number | null = null // the `at` of the entry /catchup has expanded; null: the newest
 
   // When you last typed: visuals after it are what you missed. Notifications,
   // schedules and peers submit too, but don't mean you saw anything.
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind === 'composer' || e.origin.kind === 'bridge')
+    if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
       await $.store.set(`p:${await $.session.id()}`, await $.clock.now())
+      const goal = goalOf(e.text)
+      if (goal) await $.state.set(NOW, { goal })
+    }
     return next(e)
   }).catch(($, e, next) => next(e)) // never let bookkeeping block a prompt
 
@@ -53,7 +64,8 @@ export const register: Register = on => {
   })
 
   // The latest visual's headline above the prompt, with Boo beside it in the
-  // terminal: floating while the model works, reacting to how the visual went.
+  // terminal: moving while the model works, reacting to how the visual went.
+  // The `companion` option picks small (braille, one row), big (two rows) or off.
   let workingSince: number | null = null
   let timer: { cancel: () => void } | null = null
 
@@ -67,9 +79,14 @@ export const register: Register = on => {
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
     const now = await $.clock.now()
     workingSince = e.props.isWorking ? (workingSince ?? now) : null
+    // Read while drawing, so each tool call redraws the band.
+    const live = e.props.isWorking ? ((await $.state.get(NOW)).value ?? null) : null
+    const head = [live?.goal, live?.task].filter(Boolean).join(' · ')
+    const busy = !!(head || live?.step)
 
-    if (e.surface !== 'terminal') {
+    if (e.surface !== 'terminal' || !companion) {
       const { Text } = $.ui.resolve(e)
+      if (busy) return <Text wrap="truncate-end">{oneLine(head, live?.step, cols)}</Text>
       return (
         <Text wrap="truncate-end">
           <Text color={MOOD[last.mood]} dimColor={!MOOD[last.mood]}>{last.mood} </Text>
@@ -82,31 +99,76 @@ export const register: Register = on => {
     const m = workingSince !== null ? 'working' : last.stuck !== undefined ? 'relieved' : booMood(last.spec)
     const since = workingSince ?? last.at
     const { requestId } = e
-    let shown = frameAt(m, now - since)
-
-    // Repaint only when the frame changes, sleeping until then; stop once the band is gone.
-    const step = async () => {
-      const at = frameAt(m, (await $.clock.now()) - since)
-      if (at.frame !== shown.frame) {
-        const r = await $.ui.blit({ requestId, key: 'boo', cells: cells(at.frame, BOO[m]) })
-        if (r.deny) return void (timer = null)
-      }
-      shown = at
-      timer = $.clock.after(at.wait, step)
+    const { columns, rows } = companion
+    const at = (t: number) => companion.draw(m, t)
+    // Sleep until the drawing next changes (looked ahead in 20ms steps), so a still Boo costs nothing.
+    const until = (t: number, cells: string) => {
+      for (let d = 20; d < 4000; d += 20) if (at(t + d) !== cells) return d
+      return 4000
     }
-    timer = $.clock.after(shown.wait, step)
+    let shown = at(now - since)
 
+    // Repaint only when the cells change; stop once the band is gone.
+    const step = async () => {
+      const t = (await $.clock.now()) - since
+      const cells = at(t)
+      if (cells !== shown) {
+        const r = await $.ui.blit({ requestId, key: 'boo', cells })
+        if (r.deny) return void (timer = null)
+        shown = cells
+      }
+      timer = $.clock.after(until(t, cells), step)
+    }
+    timer = $.clock.after(until(now - since, shown), step)
+
+    const room = cols - columns - 3
     return (
-      <Box flexDirection="row" gap={2}>
-        <Raster key="boo" columns={COLUMNS} rows={ROWS} cells={cells(shown.frame, BOO[m])} />
+      <Box flexDirection="row" gap={1} marginTop={1}>
+        <Raster key="boo" columns={columns} rows={rows} cells={shown} />
         <Box flexDirection="column">
-          {lines(`${last.title}  /catchup`, cols - COLUMNS - 4).map((l, k) => (
+          {busy && rows === 1 ? <Text wrap="truncate-end">{oneLine(head, live?.step, room)}</Text> : ''}
+          {/* Two rows: the goal above, the step dim below; with no goal, the step above the last headline. */}
+          {busy && rows > 1 && head ? <Text wrap="truncate-end">{cutWords(head, room)}</Text> : ''}
+          {busy && rows > 1 && head && live?.step ? <Text wrap="truncate-end" dimColor>{`› ${cut(live.step, room - 2)}`}</Text> : ''}
+          {busy && rows > 1 && !head ? <Text wrap="truncate-end">{`› ${cut(live!.step!, room - 2)}`}</Text> : ''}
+          {busy && (rows === 1 || head) ? '' : (busy ? [`${cutWords(last.title, room - 10)}  /catchup`] : rows > 1 ? lines(`${last.title}  /catchup`, room) : [`${cutWords(last.title, room - 10)}  /catchup`]).map((l, k) => (
             <Text key={String(k)} wrap="truncate-end" dimColor>{l}</Text>
           ))}
         </Box>
       </Box>
     )
   })
+
+  // What the agent is on, from its own tool calls: no model tokens. A skill names
+  // the goal, its task list the task in progress, any other tool the step.
+  const tasks = new Map<string, string>() // task id → its in-progress wording, from TaskCreate
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const a = e as unknown as Record<string, any>
+    if (e.tool === 'Skill') {
+      const goal = skillGoal(String(a.skill ?? ''), String(a.args ?? ''))
+      if (goal) await merge($, { goal, task: undefined })
+    } else if (e.tool === 'TodoWrite') {
+      const t = (a.todos as Array<{ status: string; activeForm?: string; content: string }> | undefined)?.find(t => t.status === 'in_progress')
+      await merge($, { task: t ? t.activeForm || t.content : undefined })
+    } else if (e.tool === 'TaskCreate') {
+      const r = (await next(e)) as any
+      const id = r?.result?.task?.id
+      if (id) tasks.set(String(id), a.activeForm || a.subject)
+      return r
+    } else if (e.tool === 'TaskUpdate') {
+      const wording = a.activeForm || a.subject || tasks.get(String(a.taskId))
+      if (a.status === 'in_progress' && wording) await merge($, { task: wording })
+      else if (a.status === 'completed' || a.status === 'deleted') {
+        const cur = (await $.state.get(NOW)).value
+        if (cur?.task && cur.task === tasks.get(String(a.taskId))) await merge($, { task: undefined })
+      }
+    } else {
+      const step = stepOf(a)
+      if (step) await merge($, { step })
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e)) // never let the note hold up a tool
 
   on('prompt.compose', async ($, e, next) => {
     const out = await next(e)
@@ -135,6 +197,7 @@ export const register: Register = on => {
 
   // Remember the turn's visual: the headline above the prompt + history for /catchup.
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) await $.state.set(NOW, null).catch(() => {})
     if (e.agentId === undefined && e.answer.includes('```viz')) {
       const spec = split(e.answer).flatMap(p => ('viz' in p ? [p.viz] : [])).at(-1)
       if (spec) {
@@ -224,6 +287,68 @@ function lines(s: string, n: number): string[] {
   if (!first) return [cut(s, n)]
   const rest = words.join(' ').replace(/^ +/, '')
   return [first, w(rest) <= n ? rest : `${cutWords(rest.replace(/ +\/catchup$/, ''), n - 10)}  /catchup`]
+}
+
+const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).at(-1) ?? ''
+const quoted = (q: unknown) => `“${cut(String(q ?? ''), 32)}”`
+
+/** Folds `patch` into what the agent is on. Swallows its own failures: a throw after
+ *  `next` would make the tool.call hook's catch run the tool twice. */
+async function merge($: EngineInterface, patch: Now) {
+  try {
+    const cur = (await $.state.get(NOW)).value ?? {}
+    await $.state.set(NOW, { ...cur, ...patch })
+  } catch {}
+}
+
+/** `code-review` → `Code review`. */
+const human = (s: string) => s.replace(/[-_]+/g, ' ').trim().replace(/^./, c => c.toUpperCase())
+
+/** A skill as a goal: its name, or for a plugin's lone skill (`impeccable:impeccable polish`) the plugin and the sub-command. */
+export function skillGoal(skill: string, args = ''): string | undefined {
+  const [plugin, name = plugin] = skill.split(':')
+  if (!name) return undefined
+  const sub = args.trim().split(/\s+/)[0]
+  return skill.includes(':') && name === plugin && sub && /^[a-z][\w-]*$/.test(sub) ? `${human(name)} ${sub}` : human(name)
+}
+
+/** What a prompt is for, in a few words: the slash command it runs, else its opening words. */
+export function goalOf(text: string): string | undefined {
+  const tag = /<command-name>\/?([^<]+)<\/command-name>/.exec(text)
+  if (tag) return skillGoal(tag[1].trim(), /<command-args>([^<]*)<\/command-args>/.exec(text)?.[1] ?? '')
+  const slash = /^\s*\/([\w:-]+)(.*)$/s.exec(text)
+  if (slash) return skillGoal(slash[1], slash[2])
+  const plain = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  const first = /^(.+?[.?!])(\s|$)/.exec(plain)?.[1] ?? plain
+  return first ? cutWords(first.replace(/[.?!]$/, ''), 48) : undefined
+}
+
+/** `goal · task › step` on one line of `n` cells: the step gives way first, then the task. */
+function oneLine(head: string, step: string | undefined, n: number): string {
+  if (!step) return cutWords(head, n)
+  if (!head) return `› ${cut(step, n - 2)}`
+  if (w(head) + 3 + Math.min(w(step), 16) <= n) return `${head} › ${cut(step, n - w(head) - 3)}`
+  return cutWords(head, n)
+}
+
+/** A tool call as a few words: Bash's own description, else the tool and its target. */
+export function stepOf(e: Record<string, unknown>): string | undefined {
+  const str = (k: string) => (typeof e[k] === 'string' && e[k] ? (e[k] as string) : undefined)
+  switch (e.tool) {
+    case 'Bash': return str('description') ?? `Running ${str('command')?.trim().split(/\s+/)[0] ?? 'a command'}`
+    case 'Read': return `Reading ${base(e.file_path)}`
+    case 'Edit': case 'MultiEdit': return `Editing ${base(e.file_path)}`
+    case 'Write': return `Writing ${base(e.file_path)}`
+    case 'NotebookEdit': return `Editing ${base(e.notebook_path)}`
+    case 'Grep': return `Searching for ${quoted(e.pattern)}`
+    case 'Glob': return `Finding ${quoted(e.pattern)}`
+    case 'Agent': case 'Task': return str('description') ? `Delegating: ${str('description')}` : 'Starting an agent'
+    case 'WebSearch': return `Searching the web for ${quoted(e.query)}`
+    case 'WebFetch': return `Fetching ${/^https?:\/\/([^/]+)/.exec(str('url') ?? '')?.[1] ?? 'a page'}`
+    case 'TodoWrite': case 'TaskCreate': case 'TaskUpdate': case 'TaskList': case 'TaskGet': case 'ToolSearch': return undefined // bookkeeping, not work
+  }
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(String(e.tool))
+  return mcp ? `${mcp[2].replace(/_/g, ' ')} (${mcp[1].replace(/^claude_ai_/, '').replace(/_/g, ' ')})` : `Using ${e.tool}`
 }
 
 /** When the work first went red since the last green visual; undefined if it never did. */

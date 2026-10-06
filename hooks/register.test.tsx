@@ -1,7 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 
 import { booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
+import { smallCells } from './boo-small'
 import { change, cutWords, draw, mood, parse, plain, split, w } from './render'
+import { goalOf, skillGoal, stepOf } from './register'
 
 const FLOW = `flow Release is blocked at the migrate step
 + build
@@ -174,7 +176,7 @@ test('a green visual after a blocked one plays relief, starting from the blocked
   expect(frameAt('relieved', 5000).frame).toBe('smile')
 })
 
-test('the band plays relief when the work was stuck', async ($, on) => {
+test('the band plays relief when the work was stuck', { options: { companion: 'big' } }, async ($, on) => {
   const spec = parse('flow Release shipped\n+ build\n+ migrate\n+ deploy')!
   on('session.id', () => ({ value: 's1' }))
   on('clock.now', () => ({ value: 10_000 }))
@@ -205,4 +207,102 @@ test('a green visual records how long the work was stuck since it first went red
   await turn(viz('flow Shipped\n+ a\n+ b'))
   const saved = store.get('h:s1') as Array<{ stuck?: number }>
   expect(saved.map(s => s.stuck)).toEqual([undefined, undefined, undefined, 720_000])
+})
+
+test('small Boo is three braille cells on one row, the eyes left as gaps', async () => {
+  const row = smallCells('neutral', 0)
+  expect(row.length).toBe(8)
+  expect(row.map(([c]) => String.fromCharCode(c)).join('').trim()).toBe('⡮⣿⢵')
+  for (const m of ['neutral', 'working', 'success', 'blocked', 'mixed', 'relieved'] as const) {
+    for (let t = 0; t < 4000; t += 70) {
+      for (const [c] of smallCells(m, t)) expect(c === 0x20 || (c >= 0x2800 && c <= 0x28ff)).toBe(true)
+    }
+  }
+})
+
+test('small Boo sways a dot at a time and leaves a trail while working', async () => {
+  const at = (t: number) => smallCells('working', t).map(([c]) => c)
+  expect(at(0)).not.toEqual(at(260))
+  expect(at(400).filter(c => c !== 0x20).length).toBeGreaterThan(3)
+})
+
+async function band($: any, on: any, surface: 'terminal' | 'desktop' = 'terminal') {
+  const spec = parse(FLOW)!
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 10_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.get', () => ({ value: [{ at: 0, title: spec.title, mood: '✗', spec }] }))
+  const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80 } as any
+  return $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+}
+
+test('the companion option picks small Boo by default', async ($, on) => {
+  const raster = await (await band($, on)).find({ type: 'Raster' })
+  expect([raster?.props.columns, raster?.props.rows]).toEqual([8, 1])
+})
+
+test('the companion option can pick big Boo', { options: { companion: 'big' } }, async ($, on) => {
+  const raster = await (await band($, on)).find({ type: 'Raster' })
+  expect([raster?.props.columns, raster?.props.rows]).toEqual([6, 2])
+})
+
+test('the companion option can turn Boo off', { options: { companion: 'off' } }, async ($, on) => {
+  const ui = await band($, on)
+  expect(await ui.find({ type: 'Raster' })).toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /✗/ })).not.toBe(undefined)
+})
+
+test('small Boo plays relief too, starting red and dim before it cheers', async () => {
+  const [stuck, cheering] = [smallCells('relieved', 0), smallCells('relieved', 700)]
+  expect(stuck.some(([, fg]) => fg === smallCells('blocked', 1000)[3][1])).toBe(true)
+  expect(cheering.map(([c]) => c)).toEqual(smallCells('success', 40).map(([c]) => c))
+})
+
+test('a tool call reads as a few words', async () => {
+  expect(stepOf({ tool: 'Bash', command: 'bun test', description: 'Run plugin tests' })).toBe('Run plugin tests')
+  expect(stepOf({ tool: 'Bash', command: '  git status' })).toBe('Running git')
+  expect(stepOf({ tool: 'Edit', file_path: '/repo/hooks/boo.ts' })).toBe('Editing boo.ts')
+  expect(stepOf({ tool: 'Grep', pattern: 'stuckSince' })).toBe('Searching for “stuckSince”')
+  expect(stepOf({ tool: 'WebFetch', url: 'https://code.claude.com/docs' })).toBe('Fetching code.claude.com')
+  expect(stepOf({ tool: 'mcp__claude_ai_Gmail__search_threads' })).toBe('search threads (Gmail)')
+  expect(stepOf({ tool: 'TodoWrite', todos: [] })).toBe(undefined)
+})
+
+test('a prompt names its goal: the slash command, else its opening words', async () => {
+  expect(goalOf('/code-review since main')).toBe('Code review')
+  expect(goalOf('<command-message>impeccable:impeccable</command-message>\n<command-name>/impeccable:impeccable</command-name>\n<command-args>polish</command-args>')).toBe('Impeccable polish')
+  expect(goalOf('Fix the login redirect. It loops on Safari.')).toBe('Fix the login redirect')
+  expect(goalOf('Hmm but then it shows only the exact tool it is running on the moment? what about the big picture?')).toBe('Hmm but then it shows only the exact tool it…')
+  expect(skillGoal('mattpocock-skills:code-review')).toBe('Code review')
+})
+
+for (const companion of ['big', 'small', 'off'] as const) {
+  test(`while working, the band shows the goal and the step (${companion})`, { options: { companion } }, async ($, on) => {
+    const spec = parse(FLOW)!
+    on('session.id', () => ({ value: 's1' }))
+    on('clock.now', () => ({ value: 10_000 }))
+    on('clock.after', () => ({ deny: 'no timers in this test' }))
+    on('store.get', () => ({ value: [{ at: 0, title: spec.title, mood: '✗', spec }] }))
+    on('state.get', () => ({ value: { value: { goal: 'Code review', task: 'Checking the spec', step: 'Run plugin tests' }, version: 1 } }))
+    const props = { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 100 } as any
+    const working = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'AbovePrompt', props })
+    expect(await working.find({ type: 'Text', text: /Code review · Checking the spec/ })).not.toBe(undefined)
+    expect(await working.find({ type: 'Text', text: /› Run plugin tests/ })).not.toBe(undefined)
+    const idle = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'AbovePrompt', props: { ...props, isWorking: false } })
+    expect(await idle.find({ type: 'Text', text: /Code review/ })).toBe(undefined)
+    expect(await idle.find({ type: 'Text', text: /Release is blocked/ })).not.toBe(undefined)
+  })
+}
+
+test('with only a step, the big band keeps the last headline under it', { options: { companion: 'big' } }, async ($, on) => {
+  const spec = parse(FLOW)!
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 10_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.get', () => ({ value: [{ at: 0, title: spec.title, mood: '✗', spec }] }))
+  on('state.get', () => ({ value: { value: { step: 'Run plugin tests' }, version: 1 } }))
+  const props = { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 80 } as any
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'AbovePrompt', props })
+  expect(await ui.find({ type: 'Text', text: /› Run plugin tests/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /Release is blocked/ })).not.toBe(undefined)
 })

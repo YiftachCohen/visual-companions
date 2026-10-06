@@ -2,9 +2,31 @@
   "name": "visual-companions",
   "version": "0.2.0",
   "description": "Draws agent ```viz blocks as compact visuals, keeps the latest headline above the prompt, /catchup shows recent ones. Costs the model ~200 cached prompt tokens + ~50 per visual.",
-  "author": { "name": "Yiftach Cohen", "url": "https://github.com/YiftachCohen" },
+  "author": {
+    "name": "Yiftach Cohen",
+    "url": "https://github.com/YiftachCohen"
+  },
   "homepage": "https://github.com/YiftachCohen/visual-companions",
   "repository": "https://github.com/YiftachCohen/visual-companions",
   "license": "MIT",
-  "keywords": ["visualization", "terminal", "status", "ui"]
+  "keywords": [
+    "visualization",
+    "terminal",
+    "status",
+    "ui"
+  ],
+  "userConfig": {
+    "companion": {
+      "type": "string",
+      "title": "Companion",
+      "description": "Boo beside the headline above the prompt: small (one row of braille), big (two rows of pixels), or off (a glyph only).",
+      "default": "small",
+      "options": [
+        "small",
+        "big",
+        "off"
+      ]
+    }
+  },
+  "types": "./hooks/contract.d.ts"
 }

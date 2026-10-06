@@ -93,12 +93,12 @@ export function frameAt(m: BooMood, t: number): { frame: string; wait: number } 
   return { frame: loop[0][0], wait: loop[0][1] }
 }
 
-const mix = (c: number, to: number, k: number) => {
+export const mix = (c: number, to: number, k: number) => {
   const ch = (s: number) => Math.round(((c >> s) & 255) * (1 - k) + ((to >> s) & 255) * k)
   return (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
 
-const DEFAULT = 0x01000000 // the terminal's own colour
+export const DEFAULT = 0x01000000 // the terminal's own colour
 const UPPER = 0x2580 // ▀
 const LOWER = 0x2584 // ▄
 
@@ -125,6 +125,16 @@ export function cells(frame: string, color: number): string {
   }
   return base64(new Uint8Array(out.buffer))
 }
+
+/** Cells given as [codePoint, fg, bg] triplets, encoded for a Raster. */
+export function pack(triplets: number[][]): string {
+  return base64(new Uint8Array(Uint32Array.from(triplets.flat()).buffer))
+}
+
+/** A companion the band can draw: its size, and its cells `t` ms into a mood. */
+export type Companion = { columns: number; rows: number; draw: (m: BooMood, t: number) => string }
+
+export const big: Companion = { columns: COLUMNS, rows: ROWS, draw: (m, t) => cells(frameAt(m, t).frame, COLOR[m]) }
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
