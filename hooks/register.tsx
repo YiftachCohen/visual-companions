@@ -34,13 +34,19 @@ export const register: Register = (on, options) => {
   const companion = COMPANIONS[String(options.companion ?? 'small')] // undefined: off, the glyph line
   let open: number | null = null // the `at` of the entry /catchup has expanded; null: the newest
 
+  const held: Held = { cache: null }
+
+  // Band notes are written in order but off the tool's path: a tool never waits on them.
+  let notes: Promise<unknown> = Promise.resolve()
+  const note = (f: () => Promise<unknown>) => void (notes = notes.then(f).catch(() => {}))
+
   // When you last typed: visuals after it are what you missed. Notifications,
   // schedules and peers submit too, but don't mean you saw anything.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
       await $.store.set(`p:${await $.session.id()}`, await $.clock.now())
       const goal = goalOf(e.text)
-      if (goal) await $.state.set(NOW, { goal })
+      if (goal) note(() => $.state.set(NOW, { goal }))
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // never let bookkeeping block a prompt
@@ -73,8 +79,7 @@ export const register: Register = (on, options) => {
     timer?.cancel()
     timer = null
     if (e.props.hasSurvey) return next(e)
-    const saved = ((await $.store.get(`h:${await $.session.id()}`)) as Saved[] | undefined) ?? []
-    const last = saved.at(-1)
+    const last = (await history($, held)).saved.at(-1)
     if (!last) return next(e)
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
     const now = await $.clock.now()
@@ -147,10 +152,10 @@ export const register: Register = (on, options) => {
     const a = e as unknown as Record<string, any>
     if (e.tool === 'Skill') {
       const goal = skillGoal(String(a.skill ?? ''), String(a.args ?? ''))
-      if (goal) await merge($, { goal, task: undefined })
+      if (goal) note(() => merge($, { goal, task: undefined }))
     } else if (e.tool === 'TodoWrite') {
       const t = (a.todos as Array<{ status: string; activeForm?: string; content: string }> | undefined)?.find(t => t.status === 'in_progress')
-      await merge($, { task: t ? t.activeForm || t.content : undefined })
+      note(() => merge($, { task: t ? t.activeForm || t.content : undefined }))
     } else if (e.tool === 'TaskCreate') {
       const r = (await next(e)) as any
       const id = r?.result?.task?.id
@@ -158,20 +163,25 @@ export const register: Register = (on, options) => {
       return r
     } else if (e.tool === 'TaskUpdate') {
       const wording = a.activeForm || a.subject || tasks.get(String(a.taskId))
-      if (a.status === 'in_progress' && wording) await merge($, { task: wording })
+      if (a.status === 'in_progress' && wording) note(() => merge($, { task: wording }))
       else if (a.status === 'completed' || a.status === 'deleted') {
-        const cur = (await $.state.get(NOW)).value
-        if (cur?.task && cur.task === tasks.get(String(a.taskId))) await merge($, { task: undefined })
+        const done = tasks.get(String(a.taskId))
+        tasks.delete(String(a.taskId))
+        note(async () => {
+          const cur = (await $.state.get(NOW)).value
+          if (cur?.task && cur.task === done) await merge($, { task: undefined })
+        })
       }
     } else {
       const step = stepOf(a)
-      if (step) await merge($, { step })
+      if (step) note(() => merge($, { step }))
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // never let the note hold up a tool
 
   on('prompt.compose', async ($, e, next) => {
     const out = await next(e)
+    if (e.surfaces.length === 0) return out // headless (-p, SDK): no visual would be drawn, so don't ask for one
     return { sections: [...out.sections, { id: 'visual-companions:guide', text: GUIDE, scope: 'session' as const }] }
   })
 
@@ -197,16 +207,17 @@ export const register: Register = (on, options) => {
 
   // Remember the turn's visual: the headline above the prompt + history for /catchup.
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) await $.state.set(NOW, null).catch(() => {})
+    if (e.agentId === undefined) note(() => $.state.set(NOW, null))
     if (e.agentId === undefined && e.answer.includes('```viz')) {
       const spec = split(e.answer).flatMap(p => ('viz' in p ? [p.viz] : [])).at(-1)
       if (spec) {
-        const key = `h:${await $.session.id()}`
-        const saved = ((await $.store.get(key)) as Saved[] | undefined) ?? []
+        const h = await history($, held)
+        const saved = h.saved
         const entry: Saved = { at: await $.clock.now(), title: spec.title, mood: mood(spec).glyph, spec }
         const stuck = entry.mood === '✓' ? stuckSince(saved) : undefined
         if (stuck !== undefined) entry.stuck = entry.at - stuck
-        await $.store.set(key, [...saved, entry].slice(-KEEP))
+        h.saved = [...saved, entry].slice(-KEEP)
+        await $.store.set(`h:${h.id}`, h.saved)
         $.ui.invalidate('ui.render')
       }
     }
@@ -221,8 +232,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const id = await $.session.id()
-    const saved = ((await $.store.get(`h:${id}`)) as Saved[] | undefined) ?? []
+    const { id, saved } = await history($, held)
     const seen = Number((await $.store.get(`p:${id}`)) ?? 0)
     const now = await $.clock.now()
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
@@ -292,6 +302,15 @@ function lines(s: string, n: number): string[] {
 const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).at(-1) ?? ''
 const quoted = (q: unknown) => `“${cut(String(q ?? ''), 32)}”`
 
+type Held = { cache: { id: string; saved: Saved[] } | null }
+
+/** This session's history, kept in `held` so the band, redrawn on every tool call, skips the store. */
+async function history($: EngineInterface, held: Held) {
+  const id = await $.session.id()
+  if (held.cache?.id !== id) held.cache = { id, saved: ((await $.store.get(`h:${id}`)) as Saved[] | undefined) ?? [] }
+  return held.cache
+}
+
 /** Folds `patch` into what the agent is on. Swallows its own failures: a throw after
  *  `next` would make the tool.call hook's catch run the tool twice. */
 async function merge($: EngineInterface, patch: Now) {
@@ -318,7 +337,7 @@ export function goalOf(text: string): string | undefined {
   if (tag) return skillGoal(tag[1].trim(), /<command-args>([^<]*)<\/command-args>/.exec(text)?.[1] ?? '')
   const slash = /^\s*\/([\w:-]+)(.*)$/s.exec(text)
   if (slash) return skillGoal(slash[1], slash[2])
-  const plain = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  const plain = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\[(Image|Pasted text) #\d+[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim()
   const first = /^(.+?[.?!])(\s|$)/.exec(plain)?.[1] ?? plain
   return first ? cutWords(first.replace(/[.?!]$/, ''), 48) : undefined
 }

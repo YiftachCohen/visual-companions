@@ -123,6 +123,19 @@ test('the guide is added to the system prompt', async ($, on) => {
   expect(sections.some(s => s.id === 'visual-companions:guide')).toBe(true)
 })
 
+test('the guide is left out where nothing draws', async ($, on) => {
+  on('prompt.compose', () => ({ sections: [{ id: 'base', text: 'base prompt', scope: 'shared' as const }] }))
+  const { sections } = await $.prompt.compose({
+    model: 'claude-opus-5-5',
+    promptModel: 'claude-opus-5-5',
+    surfaces: [],
+    tools: [],
+    outputStyle: null,
+    traits: ['print'],
+  })
+  expect(sections.some(s => s.id === 'visual-companions:guide')).toBe(false)
+})
+
 test('every Boo frame is 6 × 4 and packs into 6 × 2 cells', async () => {
   for (const [name, rows] of Object.entries(FRAMES)) {
     expect(rows.length).toBe(4)
@@ -274,6 +287,8 @@ test('a prompt names its goal: the slash command, else its opening words', async
   expect(goalOf('Fix the login redirect. It loops on Safari.')).toBe('Fix the login redirect')
   expect(goalOf('Hmm but then it shows only the exact tool it is running on the moment? what about the big picture?')).toBe('Hmm but then it shows only the exact tool it…')
   expect(skillGoal('mattpocock-skills:code-review')).toBe('Code review')
+  expect(goalOf('[Image #11]')).toBe(undefined)
+  expect(goalOf('[Image #2] why is this red? [Pasted text #1 +12 lines]')).toBe('why is this red')
 })
 
 for (const companion of ['big', 'small', 'off'] as const) {
