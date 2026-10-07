@@ -13,9 +13,9 @@ import type { AgentNote, Now } from './contract'
 // prompt) plus the few dozen tokens of each ```viz block it writes.
 // Rendering, the headline band and /catchup are drawn here: no model tokens.
 const GUIDE = `Visual companions: when a message reports a finding, result, decision, blocker or change of direction the user needs to re-orient, open it with one \`\`\`viz block; it is drawn as a visual. Skip it for routine or short replies. At most one per message, ≤8 lines.
-First line: <form> <headline as a claim>. Forms: flow (progress through steps), path (where in a system something happens: components in order), tree (causes or plan; indent 2 spaces per level), delta (what changed), bars (comparison), tradeoff (a choice on two axes), matrix (options against several criteria).
+First line: <form> <headline as a claim>. Forms: flow (progress through steps), path (where in a system something happens: components in order), tree (causes or plan; indent 2 spaces per level), delta (what changed), bars (comparison), tradeoff (a choice on two axes), matrix (options against several criteria), claims (what the evidence says).
 flow/path/tree item marks: + done, * active, x blocked, . todo, - dropped. Keep flow step labels ≤14 chars. "label | note" adds a note.
-delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>" (required), rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen).
+delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>" (required), rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen). claims rows "claim: 0.8 ^ !" (confidence 0..1; ^ rising, v falling, ! contested).
 "> one line" ends it: why it matters or what's next. "> ? question" instead when you need the user's decision or answer to go on.
 "@ id=<name>" on a visual you will update as the work moves (a plan, a hypothesis tree, a board): redraw it with the same id and the same row labels, and the user sees what changed.`
 

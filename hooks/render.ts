@@ -8,6 +8,7 @@
 // tree: items indented 2 spaces per level.  delta: `label: before -> after +|-`
 // bars: `label: 89 *` with `@ unit=%; max=100; bar=85`.
 // tradeoff: `label: 0.5 0.7 *` (x y in 0..1, * chosen) with `@ x=effort; y=fidelity`.
+// claims: `claim: 0.8 ^ !` (confidence 0..1 or a percentage; ^ rising, v falling, ! contested).
 
 export type Tone = 'ok' | 'bad' | 'warn' | 'data' | 'dim' | 'title' | 'pick' // pick: the highlighted or chosen option
 export type Seg = { t: string; tone?: Tone }
@@ -18,7 +19,7 @@ type Item = { status: Status; label: string; note?: string; depth: number }
 // ask: the so-what line is a question only the user can answer (`> ? …`).
 export type Spec = { form: string; title: string; soWhat?: string; ask?: boolean; opts: Record<string, string>; items: Item[] }
 
-export const FORMS = ['flow', 'path', 'tree', 'delta', 'bars', 'tradeoff', 'matrix']
+export const FORMS = ['flow', 'path', 'tree', 'delta', 'bars', 'tradeoff', 'matrix', 'claims']
 const STATUS: Record<string, Status> = { '+': 'done', '*': 'active', x: 'blocked', '.': 'todo', '-': 'dropped' }
 const MARK: Record<string, string> = { done: '✓', active: '◉', blocked: '✗', todo: '○', dropped: '⊘', null: '•' }
 const TONE: Record<string, Tone | undefined> = { done: 'ok', active: 'warn', blocked: 'bad', todo: 'dim', dropped: 'dim' }
@@ -100,7 +101,16 @@ const matrixRow = (l: string) => {
   if (chosen) cells.pop()
   return m && cells.length ? { label: m[1], cells, chosen } : null
 }
-const ROW: Record<string, ((l: string) => unknown) | undefined> = { delta: deltaRow, bars: barRow, tradeoff: pointRow, matrix: matrixRow }
+const claimRow = (l: string) => {
+  const m = /^(.*):\s*(\d*\.?\d+)(%?)((?:\s*[\^v!])*)\s*$/.exec(l)
+  if (!m || !m[1].trim()) return null
+  const n = Number(m[2])
+  const c = m[3] || n > 1 ? n / 100 : n
+  if (!isFinite(c) || c < 0 || c > 1) return null
+  const flags = m[4].replace(/\s/g, '')
+  return { label: m[1].trim(), c, text: m[2] + m[3], up: flags.includes('^'), down: flags.includes('v'), contested: flags.includes('!') }
+}
+const ROW: Record<string, ((l: string) => unknown) | undefined> = { delta: deltaRow, bars: barRow, tradeoff: pointRow, matrix: matrixRow, claims: claimRow }
 
 /** Splits markdown into prose and parsed ```viz fences; unparseable fences stay prose.
  *  Fences are tracked line by line, so a ```viz example quoted inside a longer fence stays prose.
@@ -494,6 +504,28 @@ function tradeoff(s: Spec, room: number): Line[] {
   ]
 }
 
+/** What the evidence says: each claim with its confidence as five dots, which way it is moving, and whether it is contested. */
+function claims(s: Spec, room: number): Line[] {
+  const all = s.items.map(i => ({ i, r: claimRow(i.label) }))
+  const rows = all.flatMap(({ r }) => (r ? [r] : []))
+  const vw = Math.max(...rows.map(r => w(r.text)))
+  const tail = rows.some(r => r.contested) ? 13 : 0 // `  ⚡ contested`
+  const lw = Math.max(6, Math.min(Math.max(...rows.map(r => w(r.label))), room - 2 - 5 - 1 - vw - 2 - tail))
+  return all.flatMap(({ i, r }) => {
+    if (!r) return loose(i.label, i.note, room)
+    const label = cut(r.label, lw)
+    const dots = Math.round(r.c * 5)
+    const row: Line = [
+      { t: label + ' '.repeat(lw - w(label) + 2) },
+      { t: '●'.repeat(dots), tone: 'data' }, { t: '○'.repeat(5 - dots), tone: 'dim' },
+      { t: ' ' + ' '.repeat(vw - w(r.text)) + r.text },
+      r.up ? { t: ' ▲', tone: 'ok' } : r.down ? { t: ' ▼', tone: 'bad' } : { t: '  ' },
+      ...(r.contested ? [{ t: '  ⚡ contested', tone: 'warn' as Tone }] : []),
+    ]
+    return noted(row, i.note, room)
+  })
+}
+
 // ── frame ────────────────────────────────────────────────────────────────
 
 // ── living visuals ───────────────────────────────────────────────────────
@@ -604,6 +636,7 @@ export function draw(spec: Spec, columns = 80, living?: Living): Line[] {
     : spec.form === 'bars' ? bars(spec, room)
     : spec.form === 'path' ? path(spec, room)
     : spec.form === 'matrix' ? matrix(spec, room)
+    : spec.form === 'claims' ? claims(spec, room)
     : tradeoff(spec, room)
   const rail = mood(spec).tone
   const done = spec.items.filter(i => i.status === 'done').length

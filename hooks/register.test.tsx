@@ -22,6 +22,7 @@ const EXAMPLES = [
   `tradeoff Self-hosting is the middle path\n@ x=effort saved; y=fidelity\nfork upstream: 0.85 0.35\nself-host: 0.5 0.7 *\nbuild in-house: 0.05 0.95`,
   `path Checkout requests die in the token refresh\nweb app\napi gateway\nx auth service | refresh token rejected: clock skew 4m\n. orders db`,
   `matrix Postgres wins on everything but setup\n@ cols=cost, scale, ops, setup time\npostgres: + + + ~ *\ndynamo: ~ + + + | vendor lock-in\nsqlite: + x + +`,
+  `claims Cross-encoders lead, ColBERT's latency is in doubt\n@ id=rerank\ncross-encoders beat bi-encoders on our eval set: 0.8 ^ | 4 sources\nColBERT fits the 50ms latency budget: 0.4 v ! | 2 sources, they disagree\nCohere is cheapest at scale: 60%`,
 ]
 
 test('every form parses and fits its width', async () => {
@@ -1183,4 +1184,25 @@ test('/catchup lists a living visual once, by its latest version, and opens it a
   expect(await ui.find({ type: 'Button', text: /Release is blocked/ })).not.toBe(undefined)
   await ui.press({ key: 'v:200' })
   expect(await ui.find({ type: 'Button', text: /^Safari login failure · 2 ruled out · v3$/ })).not.toBe(undefined)
+})
+
+// The evidence board.
+
+test('claims draw each claim with its confidence, which way it moves and whether it is contested', async () => {
+  const src = 'claims Reranker research\n@ id=rerank\ncross-encoders beat bi-encoders: 0.8 ^ | 4 sources\nColBERT fits latency budget: 0.4 v ! | 2 sources\nCohere cheapest at scale: 60%\nopen: latency on 10k docs untested'
+  const out = plain(draw(parse(src)!, 80)).split('\n')
+  const row = (k: string) => out.find(l => l.includes(k))!
+  expect(row('cross-encoders')).toMatch(/●●●●○ 0\.8 ▲  4 sources$/)
+  expect(row('ColBERT')).toMatch(/●●○○○ 0\.4 ▼  ⚡ contested  2 sources$/)
+  expect(row('Cohere')).toMatch(/●●●○○ 60%/)
+  // The dots line up whatever the label's length.
+  expect(row('ColBERT').indexOf('●')).toBe(row('Cohere').indexOf('●'))
+  // A row that isn't a claim is kept as written.
+  expect(row('open:')).toContain('open: latency on 10k docs untested')
+  // A confidence change reads as a change of value between versions.
+  const next = parse(src.replace('0.4 v !', '0.2 v'))!
+  expect(changes(parse(src)!, next)).toEqual([{ kind: 'value', label: 'ColBERT fits latency budget', from: '0.4 v !', to: '0.2 v' }])
+  // Nothing to plot: a code block, as other charts.
+  expect(parse('claims Nothing\nsome prose')).toBe(null)
+  expect(parse('claims Out of range\nA: 150%')).toBe(null)
 })

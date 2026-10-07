@@ -54,7 +54,7 @@ Before a compaction, the plugin asks the summary to keep what the visuals record
 
 ## Cost
 
-The plugin adds a ~230-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
+The plugin adds a ~250-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
 
 ## Forms
 
@@ -71,6 +71,7 @@ A `tradeoff` or `matrix` with a chosen option (`*`) counts as a decision and is 
 | `bars` | comparison | `new model: 89 *`, options `@ unit=%; max=100; bar=85` |
 | `tradeoff` | a choice on two axes | `self-host: 0.5 0.7 *`, options `@ x=effort saved; y=fidelity` |
 | `matrix` | options against several criteria | `postgres: + + ~ *`, options `@ cols=cost, scale, setup` (required) |
+| `claims` | what the evidence says, as it changes | `ColBERT fits 50ms p95: 0.5 v !` (confidence 0..1 or %, `^` rising, `v` falling, `!` contested) |
 
 In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked, `.` todo, `-` dropped. Keep flow step labels to about 14 characters so the steps fit on one track. Add `| note` to any row to attach a note.
 
@@ -85,6 +86,20 @@ In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked, 
 ```
 
 A fence whose first word is not a known form is left as a normal code block.
+
+```
+╭─ ColBERT latency is now contested, and Cohere's case is weaker  v2
+│
+│  Cross-encoder beats bi-encoder on BEIR  ●●●●○ 0.75
+│  ColBERT fits 50ms p95                   ●●●○○  0.5    ⚡ contested
+│  Cohere fits cost budget                 ●●○○○  0.3 ▼
+│
+│  ↻ since v1: 1 new · 1 changed
+│  ~ ColBERT fits 50ms p95  0.6 → 0.5 !
+│  + Cohere fits cost budget
+│
+╰─→ Check the hardware behind the 120ms vs 35ms numbers
+```
 
 ### Living visuals
 
