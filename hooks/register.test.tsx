@@ -104,7 +104,7 @@ test('rows are read the way an agent writes them, and none are lost', async () =
   expect(parse('delta Nothing\nlogs: now structured')).toBe(null)
 })
 
-test('path draws components as boxes, and runs on to a new row when narrow', async () => {
+test('path draws components as boxes, and falls back to the list when they need a second row', async () => {
   const src = 'path Checkout dies in the token refresh\nweb app\napi gateway\nx auth service | refresh token rejected\n. orders db'
   const wide = plain(draw(parse(src)!, 80))
   expect(wide).toContain('│ web app │──▶│ api gateway │')
@@ -113,8 +113,11 @@ test('path draws components as boxes, and runs on to a new row when narrow', asy
   expect(wide).toMatch(/└─+✗─+┘/)
   expect(wide).toContain('↑ refresh token rejected')
   const narrow = plain(draw(parse(src)!, 44))
-  expect(narrow).toContain('─╮')
-  expect(narrow).toContain('╰▶│')
+  expect(narrow).not.toContain('┌')
+  expect(narrow).toMatch(/✗  auth service/)
+  expect(narrow).toContain('refresh token rejected')
+  // A list is one line per component (plus notes and rail), not three.
+  expect(narrow.split('\n').length).toBeLessThan(plain(draw(parse(src)!, 80)).split('\n').length + 4)
   expect(mood(parse(src)!).glyph).toBe('✗')
   // Unmarked components draw without a mark; a lone component is still a path.
   expect(plain(draw(parse('path One\napi')!))).not.toMatch(/[✓✗○◉⊘•]/)
@@ -130,6 +133,9 @@ test('matrix lines cells up under their criteria and stars the choice', async ()
   expect(m.find(l => l.includes('duck'))).toContain('1.2k')
   // A matrix with no row to draw stays a code block.
   expect(parse('matrix Nothing\n@ cols=a\njust prose')).toBe(null)
+  // So does one with no criteria to read its marks against.
+  expect(parse('matrix Unlabeled\npg: + ~ *\nlite: + x')).toBe(null)
+  expect(parse('matrix Blank\n@ cols= , \npg: + ~')).toBe(null)
 })
 
 test('a viz fence still streaming draws as it grows', async () => {
@@ -662,4 +668,45 @@ test('/catchup lays out questions, goals, agents and other sessions, then the hi
   expect(await ui.find({ type: 'Button', text: /^Eval run 0$/ })).toBe(undefined)
   await ui.press({ key: 'more' })
   expect(await ui.find({ type: 'Button', text: /^Eval run 0$/ })).not.toBe(undefined)
+})
+
+test('a goal Haiku names after the turn ended is given to the visuals since that prompt', async ($, on) => {
+  const store = new Map<string, unknown>()
+  let now = 100
+  let state: any = { goal: 'Older work' }
+  let answer!: (r: unknown) => void
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: now }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.get', (_, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('state.get', () => ({ value: { value: state, version: 1 } }))
+  on('state.set', (_, e: any) => { state = e.value; return { value: { version: 2 } } as any })
+  on('model.complete', () => new Promise(r => (answer = r)) as any)
+  on('prompt.submit', (_, e: any) => ({ text: e.text }) as any)
+  on('turn.complete', () => ({ text: '' }))
+  const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
+  store.set('h:s1', [{ ...at(50, FLOW, 'Older work') }])
+  await $.prompt.submit({ text: 'Migrate the users table to the new schema', wait: false, origin: { kind: 'composer' } } as any)
+  now = 200
+  await $.turn.complete({ answer: '```viz\n' + FLOW + '\n```', durationMs: 1, isAborted: false, turnId: '1', reason: 'answer' } as any)
+  const goals = () => (store.get('h:s1') as Array<{ goal?: string }>).map(s => s.goal)
+  expect(goals()).toEqual(['Older work', 'Older work'])
+  answer({ value: { isAnswered: true, text: 'Migrate users table' } })
+  await settle()
+  expect(goals()).toEqual(['Older work', 'Migrate users table'])
+})
+
+test('a subagent is asked to open its answer with a headline', async ($, on) => {
+  let prompt = ''
+  on('agent.spawn', (_, e: any) => { prompt = e.prompt; return { model: 'claude-haiku-4-5-20251001', agentId: 'ag1' } as any })
+  await $.agent.spawn({ prompt: 'Find stale docs', description: 'Docs audit' } as any).catch(() => {})
+  expect(prompt).toMatch(/^Find stale docs\n\nStart your final answer with a one-line headline/)
+})
+
+test('activity off leaves a subagent task as written', { options: { activity: false } }, async ($, on) => {
+  let prompt = ''
+  on('agent.spawn', (_, e: any) => { prompt = e.prompt; return { model: 'claude-haiku-4-5-20251001', agentId: 'ag1' } as any })
+  await $.agent.spawn({ prompt: 'Find stale docs', description: 'Docs audit' } as any).catch(() => {})
+  expect(prompt).toBe('Find stale docs')
 })

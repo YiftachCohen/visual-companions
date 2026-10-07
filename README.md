@@ -31,7 +31,7 @@ The agent opens such a reply with a short ` ```viz ` block. The plugin draws tha
 
 ## Cost
 
-The plugin adds a ~200-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. Drawing, the headline line and `/catchup` run locally and use no model tokens.
+The plugin adds a ~200-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line and `/catchup` run locally and use no model tokens.
 
 ## Forms
 
@@ -42,12 +42,12 @@ A `tradeoff` or `matrix` with a chosen option (`*`) counts as a decision and is 
 | Form | Use it for | Rows |
 | --- | --- | --- |
 | `flow` | progress through steps | `+ build`, `x migrate \| note` |
-| `path` | where in a system something happens | components in order, same marks as `flow` |
+| `path` | where in a system something happens | components in order, same marks as `flow`; drawn as boxes when they fit on one row, else as a list |
 | `tree` | causes or a plan | items indented 2 spaces per level |
 | `delta` | what changed | `recall: 0.91 -> 0.95 +` |
 | `bars` | comparison | `new model: 89 *`, options `@ unit=%; max=100; bar=85` |
 | `tradeoff` | a choice on two axes | `self-host: 0.5 0.7 *`, options `@ x=effort saved; y=fidelity` |
-| `matrix` | options against several criteria | `postgres: + + ~ *`, options `@ cols=cost, scale, setup` |
+| `matrix` | options against several criteria | `postgres: + + ~ *`, options `@ cols=cost, scale, setup` (required) |
 
 In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked, `.` todo, `-` dropped. Keep flow step labels to about 14 characters so the steps fit on one track. Add `| note` to any row to attach a note.
 
@@ -71,7 +71,7 @@ Every setting is a row in `/config`, and you can also set them when you install 
 | --- | --- | --- | --- |
 | `visuals` | on / off | on | Off removes the guide from the system prompt, so the agent stops writing visuals and the plugin uses no model tokens. |
 | `band` | on / off | on | The line above the prompt, with Boo: the goal and the latest headline, or an earlier ✗ when no ✓ has followed it, plus its age, how many visuals came in since you last typed, and how many agents are still running. |
-| `activity` | on / off | on | The band shows the goal; while the agent works, also its task and progress (`2/5`). The current tool step appears only when there's room (big Boo) or nothing else to show. Off also skips the small Haiku call that names a plain prompt's goal, and stops tagging visuals with goals and noting what subagents do. |
+| `activity` | on / off | on | The band shows the goal; while the agent works, also its task and progress (`2/5`). The current tool step appears only when there's room (big Boo) or nothing else to show. Off also skips the small Haiku call that names a plain prompt's goal, and stops tagging visuals with goals, noting what subagents do, and asking them for a headline. |
 | `history` | 10 / 20 / 50 | 20 | How many visuals `/catchup` keeps per session. It lists the latest 8; *Show all* lists the rest. |
 | `retention` | 7 / 30 / 90 | 30 | Days before other sessions' visual history is deleted. |
 | `companion` | small / big / off | small | Boo's size: one row of braille, two rows of pixels, or a glyph only. |

@@ -59,6 +59,8 @@ export function parse(src: string): Spec | null {
   // A chart with no row it can plot is left as the code block it was written as.
   const row = ROW[form]
   if (row && !spec.items.some(i => row(i.label))) return null
+  // Marks under no criteria mean nothing: without `@ cols=` a matrix stays a code block too.
+  if (form === 'matrix' && !(spec.opts.cols ?? '').replace(/,/g, '').trim()) return null
   return spec.items.length ? spec : null
 }
 
@@ -229,7 +231,12 @@ function flow(s: Spec, room: number): Line[] {
     }
     return out
   }
-  // Too wide for the track: one step per line, joined by a rail only while that stays short.
+  return list(s, room)
+}
+
+/** One step per line, joined by a rail only while that stays short: flow's and path's layout when too wide. */
+function list(s: Spec, room: number): Line[] {
+  const it = s.items
   const col = Math.max(...it.map(i => w(i.label))) + 6
   const rail = it.length <= 4
   const out: Line[] = []
@@ -355,40 +362,26 @@ const BORDER: Record<string, Tone | undefined> = { blocked: 'bad', active: 'warn
 const BROKEN = new Set<Status>(['blocked', 'todo', 'dropped'])
 
 function path(s: Spec, room: number): Line[] {
-  const it = s.items.map(i => ({ ...i, label: cut(i.label, room - 10) }))
+  const it = s.items
   const bw = (n: number) => w(it[n].label) + 4
-  // Boxes in rows that fit; a row that runs on ends in ─╮ and the next starts with ╰▶.
-  const rows: number[][] = [[]]
-  let x = 0
-  it.forEach((_, n) => {
-    const lead = rows.length > 1 && rows[rows.length - 1].length === 0 ? 2 : 0
-    const need = lead + bw(n) + (n < it.length - 1 ? 3 : 0)
-    if (rows[rows.length - 1].length && x + need > room) { rows.push([]); x = 2 }
-    else x += lead
-    rows[rows.length - 1].push(n)
-    x += bw(n) + 3
-  })
-  const out: Line[] = []
+  // Boxes earn their height only when the whole route is in view on one row: otherwise flow's list.
+  if (it.reduce((x, _, n) => x + bw(n), 0) + 3 * (it.length - 1) > room) return list(s, room)
+  const top: Line = [], mid: Line = [], bot: Line = []
   const col: number[] = [] // where each box starts, for its note
-  rows.forEach((row, r) => {
-    const top: Line = [], mid: Line = [], bot: Line = []
-    if (r > 0) { top.push(sp(2)); mid.push({ t: '╰▶', tone: 'dim' }); bot.push(sp(2)) }
-    row.forEach((n, k) => {
-      const i = it[n], tone = BORDER[String(i.status)] ?? 'dim', inner = bw(n) - 2
-      col[n] = lineW(top)
-      const m = i.status ? MARK[i.status] : ''
-      const left = Math.floor((inner - w(m)) / 2)
-      top.push({ t: '┌' + '─'.repeat(inner) + '┐', tone })
-      mid.push({ t: '│ ', tone }, { t: i.label, tone: TONE[String(i.status)] === 'dim' ? 'dim' : BORDER[String(i.status)] ?? 'title' }, { t: ' │', tone })
-      bot.push({ t: '└' + '─'.repeat(left), tone }, ...(m ? [mark(i.status)] : []), { t: '─'.repeat(inner - left - w(m)) + '┘', tone })
-      if (n === it.length - 1) return
-      const broken = BROKEN.has(i.status)
-      const last = k === row.length - 1
-      top.push(sp(last ? 2 : 3)); bot.push(sp(last ? 2 : 3))
-      mid.push({ t: last ? (broken ? '┄╮' : '─╮') : broken ? '┄┄▶' : '──▶', tone: broken ? 'dim' : undefined })
-    })
-    out.push(top, mid, bot)
+  it.forEach((i, n) => {
+    const tone = BORDER[String(i.status)] ?? 'dim', inner = bw(n) - 2
+    col[n] = lineW(top)
+    const m = i.status ? MARK[i.status] : ''
+    const left = Math.floor((inner - w(m)) / 2)
+    top.push({ t: '┌' + '─'.repeat(inner) + '┐', tone })
+    mid.push({ t: '│ ', tone }, { t: i.label, tone: TONE[String(i.status)] === 'dim' ? 'dim' : BORDER[String(i.status)] ?? 'title' }, { t: ' │', tone })
+    bot.push({ t: '└' + '─'.repeat(left), tone }, ...(m ? [mark(i.status)] : []), { t: '─'.repeat(inner - left - w(m)) + '┘', tone })
+    if (n === it.length - 1) return
+    const broken = BROKEN.has(i.status)
+    top.push(sp(3)); bot.push(sp(3))
+    mid.push({ t: broken ? '┄┄▶' : '──▶', tone: broken ? 'dim' : undefined })
   })
+  const out: Line[] = [top, mid, bot]
   // Notes under their box, or `label · note` from the left when they won't fit there.
   for (const [n, i] of it.entries()) {
     if (!i.note) continue

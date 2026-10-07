@@ -13,8 +13,11 @@ import type { AgentNote, Now } from './contract'
 const GUIDE = `Visual companions: when a message reports a finding, result, decision, blocker or change of direction the user needs to re-orient, open it with one \`\`\`viz block; it is drawn as a visual. Skip it for routine or short replies. At most one per message, ≤8 lines.
 First line: <form> <headline as a claim>. Forms: flow (progress through steps), path (where in a system something happens: components in order), tree (causes or plan; indent 2 spaces per level), delta (what changed), bars (comparison), tradeoff (a choice on two axes), matrix (options against several criteria).
 flow/path/tree item marks: + done, * active, x blocked, . todo, - dropped. Keep flow step labels ≤14 chars. "label | note" adds a note.
-delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>", rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen).
+delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>" (required), rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen).
 "> one line" ends it: why it matters or what's next. "> ? question" instead when you need the user's decision or answer to go on.`
+
+// Added to each subagent's task while `activity` is on: ~20 tokens per spawn.
+const HEADLINE = 'Start your final answer with a one-line headline that states the outcome as a claim.'
 
 const PANE = 'catchup'
 const RECENT = 8 // history rows /catchup lists before "Show all"
@@ -67,7 +70,8 @@ export const register: Register = (on, options) => {
       const goal = goalOf(e.text)
       const turn = ++prompts
       if (goal) note(() => $.state.set(NOW, { goal }))
-      else void nameGoal($, e.text).then(g => { if (g && turn === prompts) note(() => merge($, { goal: g })) })
+      // Haiku can answer after the turn has ended: the visuals saved since this prompt take its goal then.
+      else void nameGoal($, e.text).then(g => { if (g && turn === prompts) note(async () => { await merge($, { goal: g }); await regoal($, held, at, g) }) })
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // never let bookkeeping block a prompt
@@ -198,8 +202,10 @@ export const register: Register = (on, options) => {
   })
 
   // Agents that finish or start change the band's count: nothing else redraws it then.
+  // A subagent's answer reaches the main agent, not you: ask it to open with a headline,
+  // which /catchup shows as what it found (and the main agent can scan too).
   on('agent.spawn', async ($, e, next) => {
-    const r = await next(e)
+    const r = await next(activity ? { ...e, prompt: `${e.prompt}\n\n${HEADLINE}` } : e)
     $.ui.invalidate('ui.render')
     return r
   }).catch(($, e, next) => next(e))
@@ -297,8 +303,8 @@ export const register: Register = (on, options) => {
       const spec = split(e.answer).flatMap(p => ('viz' in p ? [p.viz] : [])).at(-1)
       if (spec) {
         const h = await history($, held)
+        await notes // the goal a prompt or skill named this turn is written by now (or regoal fills it in later)
         const saved = h.saved
-        await notes // the goal a prompt or skill named this turn is written by now
         const goal = activity ? ((await $.state.get(NOW)).value?.goal ?? undefined) : undefined
         const entry: Saved = { at: await $.clock.now(), title: spec.title, mood: mood(spec).glyph, spec, ...(goal ? { goal } : {}) }
         const stuck = entry.mood === '✓' ? stuckSince(saved.filter(s => s.goal === goal)) : undefined
@@ -575,6 +581,17 @@ export function byGoal(saved: Saved[]): Array<{ goal?: string; saved: Saved[] }>
   const groups = new Map<string | undefined, Saved[]>()
   for (const s of saved) groups.set(s.goal, [...(groups.get(s.goal) ?? []), s])
   return [...groups].map(([goal, saved]) => ({ goal, saved })).sort((a, b) => b.saved.at(-1)!.at - a.saved.at(-1)!.at)
+}
+
+/** Gives the visuals saved at or after `since` the goal named for that prompt, when it came in after they were saved. */
+async function regoal($: EngineInterface, held: Held, since: number, goal: string) {
+  try {
+    const h = await history($, held)
+    if (!h.saved.some(s => s.at >= since && s.goal !== goal)) return
+    h.saved = h.saved.map(s => (s.at >= since ? { ...s, goal } : s))
+    await $.store.set(`h:${h.id}`, h.saved)
+    $.ui.invalidate('ui.render')
+  } catch {}
 }
 
 /** Folds `patch` into one agent's note; keeps the 20 heard from last. Swallows its failures, as merge does. */
