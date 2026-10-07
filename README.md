@@ -68,7 +68,7 @@ Updates arrive when the version changes. Claude Code doesn't auto-update third-p
 
 ## Cost
 
-The plugin adds a ~250-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
+The plugin adds a ~400-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
 
 ## Forms
 
@@ -89,7 +89,7 @@ A `tradeoff` or `matrix` with a chosen option (`*`) counts as a decision and is 
 | `matrix` | options against several criteria | `postgres: + + ~ *`, options `@ cols=cost, scale, setup` (required) |
 | `claims` | what the evidence says, as it changes | `ColBERT fits 50ms p95: 0.5 v !` (confidence 0..1 or %, `^` rising, `v` falling, `!` contested) |
 
-In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked, `.` todo, `-` dropped. Keep flow step labels to about 14 characters so the steps fit on one track. Add `| note` to any row to attach a note. A `tree` whose leaves carry marks says how much of it has been explored (✓, ⊘ or ✗) in its title, `3/7 explored`, and each branch with two leaves or more says it beside its label.
+In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked (stuck until something changes), `.` todo, `-` dropped or ruled out. A gap or a "no" in an analysis is not a blocker: the band would show it as one, so mark it `-` or add a note. Keep flow step labels to about 14 characters so the steps fit on one track. Add `| note` to any row to attach a note. A `tree` whose leaves carry marks says how much of it has been explored (✓, ⊘ or ✗) in its title, `3/7 explored`, and each branch with two leaves or more says it beside its label.
 
 ```
 ╭─ New ranking model trades latency for recall

@@ -17,7 +17,7 @@ import type { AgentNote, Now } from './contract'
 // Rendering, the headline band and /catchup are drawn here: no model tokens.
 const GUIDE = `Visual companions: when a message reports a finding, result, decision, blocker or change of direction the user needs to re-orient, open it with one \`\`\`viz block; it is drawn as a visual. Skip it for routine or short replies. At most one per message, ≤8 lines.
 First line: <form> <headline as a claim>. Forms: flow (progress through steps), path (where in a system something happens: components in order), tree (causes or plan; indent 2 spaces per level), delta (what changed), bars (comparison), tradeoff (a choice on two axes), matrix (options against several criteria), claims (what the evidence says).
-flow/path/tree item marks: + done, * active, x blocked, . todo, - dropped. Keep flow step labels ≤14 chars. "label | note" adds a note.
+flow/path/tree item marks: + done, * active, x blocked (stuck until something changes), . todo, - dropped or ruled out. A gap or a "no" in an analysis is not blocked: mark it - or add a note. Keep flow step labels ≤14 chars. "label | note" adds a note.
 delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>" (required), rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen). claims rows "claim: 0.8 ^ !" (confidence 0..1; ^ rising, v falling, ! contested).
 "> one line" ends it: why it matters or what's next. "> ? question" instead when you need the user's decision or answer to go on.
 "@ id=<name>" on a visual you will update as the work moves (a plan, a hypothesis tree, a board): redraw it with the same id and the same row labels, and the user sees what changed.`
@@ -625,6 +625,8 @@ function pick<T extends string>(v: unknown, allowed: readonly T[], fallback: T):
   return (allowed as readonly unknown[]).includes(v) ? (v as T) : fallback
 }
 
+// A session's folder as stored; anything else (an older version kept other data under `d:`) is no name.
+const dirOf = (v: unknown) => (typeof v === 'string' ? v : '')
 const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).at(-1) ?? ''
 const quoted = (q: unknown) => `“${cut(String(q ?? ''), 32)}”`
 
@@ -922,7 +924,7 @@ async function peersOf($: EngineInterface, id: string, now: number): Promise<Pee
       const rec = (await $.store.get(key)) as { at?: number; goal?: string; files?: Edits } | undefined
       if (!rec?.files || typeof rec.at !== 'number' || now - rec.at > CLASH_WINDOW) continue
       const sid = key.slice(2)
-      const dir = String((await $.store.get(`d:${sid}`)) ?? '')
+      const dir = dirOf(await $.store.get(`d:${sid}`))
       out.push({ id: sid, label: rec.goal || dir || 'another session', files: rec.files })
     }
     return out
@@ -943,7 +945,7 @@ async function otherSessions($: EngineInterface, id: string, now: number) {
       if (!last || now - last.at > DAY) continue
       const ask = waiting(saved, Number((await $.store.get(`p:${sid}`)) ?? 0))
       const lead = ask ?? outcome(saved)
-      const dir = String((await $.store.get(`d:${sid}`)) ?? sid.slice(0, 8))
+      const dir = dirOf(await $.store.get(`d:${sid}`)) || sid.slice(0, 8)
       const text = ask ? `Needs you: ${ask.spec.soWhat}` : [lead.goal, lead.title].filter(Boolean).join(' → ')
       out.push({ id: sid, dir, glyph: ask ? '?' : lead.mood, text, at: last.at, ask: !!ask })
     }

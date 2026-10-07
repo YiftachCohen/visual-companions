@@ -675,6 +675,17 @@ test('/catchup lays out questions, goals, agents and other sessions, then the hi
   expect(await ui.find({ type: 'Button', text: /^Eval run 0$/ })).not.toBe(undefined)
 })
 
+test('/catchup names another session by its id when its folder entry is from an older version', async ($, on) => {
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 600_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.keys', () => ({ value: ['h:s1', 'h:s2abcdefgh', 'd:s2abcdefgh'] }))
+  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': [at(0, FLOW)], 'h:s2abcdefgh': [at(500_000, FLOW, 'Ship web')], 'd:s2abcdefgh': [{ ms: 2833, at: 1 }] } as any)[e.key] }))
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
+  expect(await ui.find({ type: 'Text', text: /object Object/ })).toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /^s2abcdef$/ })).not.toBe(undefined)
+})
+
 test('a goal Haiku names after the turn ended is given to the visuals since that prompt', async ($, on) => {
   const store = new Map<string, unknown>()
   let now = 100

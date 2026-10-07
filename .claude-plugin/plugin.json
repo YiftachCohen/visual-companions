@@ -1,7 +1,7 @@
 {
   "name": "visual-companions",
   "version": "0.3.0",
-  "description": "Draws agent ```viz blocks as compact visuals, keeps the latest headline above the prompt, /catchup shows recent ones. Costs the model ~250 cached prompt tokens + ~50 per visual.",
+  "description": "Draws agent ```viz blocks as compact visuals, keeps the latest headline above the prompt, /catchup shows recent ones. Costs the model ~400 cached prompt tokens + ~50 per visual.",
   "author": {
     "name": "Yiftach Cohen",
     "url": "https://github.com/YiftachCohen"
@@ -19,7 +19,7 @@
     "visuals": {
       "type": "boolean",
       "title": "Visuals",
-      "description": "Ask the agent for viz blocks. Off removes the ~250-token guide from the system prompt, so no new visuals are drawn.",
+      "description": "Ask the agent for viz blocks. Off removes the ~400-token guide from the system prompt, so no new visuals are drawn.",
       "default": true
     },
     "band": {
