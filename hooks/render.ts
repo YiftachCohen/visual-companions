@@ -168,7 +168,8 @@ export function mood(spec: Spec): { glyph: string; tone: Tone } {
 
 // ── drawing helpers ──────────────────────────────────────────────────────
 
-const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1F300}-\u{1FAFF}]/u
+// Emoji drawn as pictures are two cells wide, in the BMP too (✅ ❌ ⚡ ⭐): agents write them into labels.
+const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1F300}-\u{1FAFF}⌚⌛⏩-⏬⏰⏳◽◾☔☕♈-♓♿⚓⚡⚪⚫⚽⚾⛄⛅⛎⛔⛪⛲⛳⛵⛺⛽✅✊✋✨❌❎❓-❕❗➕-➗➰➿⬛⬜⭐⭕]/u
 export const w = (s: string) => [...s].reduce((n, c) => n + (WIDE.test(c) ? 2 : 1), 0)
 const sp = (n: number): Seg => ({ t: ' '.repeat(Math.max(0, n)) })
 const lineW = (l: Line) => l.reduce((n, s) => n + w(s.t), 0)
@@ -247,11 +248,11 @@ function flow(s: Spec, room: number): Line[] {
 /** One step per line, joined by a rail only while that stays short: flow's and path's layout when too wide. */
 function list(s: Spec, room: number): Line[] {
   const it = s.items
-  const col = Math.max(...it.map(i => w(i.label))) + 6
+  const col = Math.min(room, Math.max(...it.map(i => w(i.label))) + 6)
   const rail = it.length <= 4
   const out: Line[] = []
   it.forEach((i, n) => {
-    const left: Line = [mark(i.status), sp(2), { t: i.label, tone: labelTone(s, n) }]
+    const left: Line = [mark(i.status), sp(2), { t: cut(i.label, room - 3), tone: labelTone(s, n) }]
     out.push(...(i.note ? leader(left, i.note, col, room, [sp(3)]) : [left]))
     if (rail && n < it.length - 1) out.push([i.status === 'done' ? { t: '┃', tone: 'ok' } : { t: '┊', tone: 'dim' }])
   })
@@ -291,9 +292,9 @@ function tree(s: Spec, room: number): Line[] {
     if (i.depth > 0) stem += isLast ? '╰─ ' : '├─ '
     // A branch shows how much of it has been explored, unless it is the whole tree (that is in the title) or has a note.
     const covered = i.depth === 0 && roots === 1 ? '' : coverage(it, n)
-    rows.push({ left: [{ t: stem, tone: 'dim' }, mark(i.status), sp(1), { t: i.label, tone: i.depth === 0 ? 'title' : i.status === 'blocked' ? 'bad' : undefined }], under: [{ t: under, tone: 'dim' }], note: i.note ?? (covered || undefined) })
+    rows.push({ left: [{ t: stem, tone: 'dim' }, mark(i.status), sp(1), { t: cut(i.label, Math.max(4, room - w(stem) - 2)), tone: i.depth === 0 ? 'title' : i.status === 'blocked' ? 'bad' : undefined }], under: [{ t: under, tone: 'dim' }], note: i.note ?? (covered || undefined) })
   })
-  const col = Math.max(...rows.map(r => lineW(r.left))) + 2
+  const col = Math.min(room, Math.max(...rows.map(r => lineW(r.left))) + 2)
   return rows.flatMap(r => (r.note ? leader(r.left, r.note, col, room, r.under) : [r.left]))
 }
 
@@ -359,9 +360,10 @@ function bars(s: Spec, room: number): Line[] {
   // Bars grow from zero: a negative value draws an empty track beside its number.
   const top = [amount(s.opts.max ?? '')?.v, Math.max(...items.map(i => i.v))].find(x => x !== undefined && x > 0) ?? 1
   const th = s.opts.bar !== undefined ? amount(s.opts.bar)?.v : undefined
-  const lw = Math.max(...items.map(i => w(i.label)))
   const vw = Math.max(...items.map(i => w(i.text)))
-  const span = Math.max(10, room - lw - vw - 7)
+  // A narrow room shortens the labels before the track goes under 10 cells.
+  const lw = Math.max(4, Math.min(Math.max(...items.map(i => w(i.label))), room - vw - 7 - 10))
+  const span = Math.max(6, room - lw - vw - 7)
   const at = th !== undefined && isFinite(th) ? Math.round((th / top) * span) : undefined
   const tcol = at !== undefined && at >= 0 && at < span ? at : undefined
   const out: Line[] = all.flatMap(({ i: src, r: i }) => {
@@ -372,7 +374,8 @@ function bars(s: Spec, room: number): Line[] {
     const part = eighths % 8
     const bar = '█'.repeat(full) + (part ? ' ▏▎▍▌▋▊▉'[part] : '')
     let track = '·'.repeat(Math.max(0, span - w(bar)))
-    const segs: Line = [sp(lw - w(i.label)), { t: i.label, tone: i.hi ? 'title' : undefined }, sp(2), { t: bar, tone: i.hi ? 'pick' : 'data' }]
+    const label = cut(i.label, lw)
+    const segs: Line = [sp(lw - w(label)), { t: label, tone: i.hi ? 'title' : undefined }, sp(2), { t: bar, tone: i.hi ? 'pick' : 'data' }]
     if (tcol !== undefined && tcol >= w(bar) && tcol < span) {
       const k = tcol - w(bar)
       segs.push({ t: track.slice(0, k), tone: 'dim' }, { t: '┆', tone: 'warn' }, { t: track.slice(k + 1), tone: 'dim' })
@@ -382,7 +385,12 @@ function bars(s: Spec, room: number): Line[] {
     if (i.hi) segs.push({ t: '  ◀', tone: 'pick' })
     return noted(segs, src.note, room)
   })
-  if (tcol !== undefined) out.push([sp(lw + 2 + tcol), { t: `╰ ${/\d$/.test(s.opts.bar!) ? s.opts.bar + unit : s.opts.bar} bar`, tone: 'warn' }])
+  if (tcol !== undefined) {
+    // The threshold's name reads to the right of its line, or to the left when it would run past the room.
+    const name = `${/\d$/.test(s.opts.bar!) ? s.opts.bar + unit : s.opts.bar} bar`
+    const at = lw + 2 + tcol
+    out.push(at + 2 + w(name) <= room || at < w(name) + 2 ? [sp(at), { t: cut(`╰ ${name}`, room - at), tone: 'warn' }] : [sp(at - w(name) - 1), { t: `${name} ╯`, tone: 'warn' }])
+  }
   return out
 }
 
@@ -433,13 +441,18 @@ function matrix(s: Spec, room: number): Line[] {
   const cellW = (c: string) => w(CELL[c]?.t ?? c)
   let hw = [...Array(n)].map((_, k) => Math.max(w(heads[k] ?? ''), ...rows.map(r => cellW(r.cells[k] ?? ''))))
   let lw = Math.max(...rows.map(r => w(r.label)))
-  const total = () => 2 + lw + hw.reduce((a, b) => a + b + 2, 0)
-  // Too wide: shorten headers to 5 cells, then labels.
-  if (total() > room) hw = hw.map((h, k) => Math.max(Math.min(h, 5), ...rows.map(r => cellW(r.cells[k] ?? ''))))
+  let gap = 2
+  const total = () => 2 + lw + hw.reduce((a, b) => a + b + gap, 0)
+  // Too wide: shorten headers to 5 cells, then labels, then headers to 3, then the gaps between columns.
+  const narrow = (n: number) => { if (total() > room) hw = hw.map((h, k) => Math.max(Math.min(h, n), ...rows.map(r => cellW(r.cells[k] ?? '')))) }
+  narrow(5)
+  if (total() > room) lw = Math.max(6, lw - (total() - room))
+  narrow(3)
   if (total() > room) lw = Math.max(4, lw - (total() - room))
+  if (total() > room) { gap = 1; lw = Math.min(Math.max(...rows.map(r => w(r.label))), lw + room - total()) }
   const center = (seg: Seg, width: number): Line => {
     const t = cut(seg.t, width), l = Math.floor((width - w(t)) / 2)
-    return [sp(2 + l), { ...seg, t }, sp(width - w(t) - l)]
+    return [sp(gap + l), { ...seg, t }, sp(width - w(t) - l)]
   }
   const out: Line[] = []
   if (heads.some(Boolean)) out.push([sp(2 + lw), ...hw.flatMap((h, k) => center({ t: heads[k] ?? '', tone: 'dim' }, h))])
@@ -497,7 +510,7 @@ function tradeoff(s: Spec, room: number): Line[] {
     else {
       const tag = String.fromCharCode(65 + legend.length)
       put(p.y, p.x, tag, tone)
-      legend.push([{ t: `${tag}  ${p.names.join(', ')}` }, ...(p.chosen ? [{ t: ' ★', tone: 'pick' as Tone }] : [])])
+      legend.push([{ t: `${tag}  ${cut(p.names.join(', '), room - 3 - (p.chosen ? 2 : 0))}` }, ...(p.chosen ? [{ t: ' ★', tone: 'pick' as Tone }] : [])])
     }
   }
   const notes = pts.flatMap(p => p.notes).map(n => [{ t: cut(n, room), tone: 'dim' as Tone }])
@@ -528,8 +541,10 @@ function claims(s: Spec, room: number): Line[] {
   const all = s.items.map(i => ({ i, r: claimRow(i.label) }))
   const rows = all.flatMap(({ r }) => (r ? [r] : []))
   const vw = Math.max(...rows.map(r => w(r.text)))
-  const tail = rows.some(r => r.contested) ? 13 : 0 // `  ⚡ contested`
-  const lw = Math.max(6, Math.min(Math.max(...rows.map(r => w(r.label))), room - 2 - 5 - 1 - vw - 2 - tail))
+  const fixed = 2 + 5 + 1 + vw + 2 // gap, dots, value, trend
+  // `⚡ contested`, or `⚡` alone when the words would squeeze the claims under 16 cells.
+  const tag = !rows.some(r => r.contested) ? '' : room - fixed - w('  ⚡ contested') >= 16 ? '  ⚡ contested' : '  ⚡'
+  const lw = Math.max(6, Math.min(Math.max(...rows.map(r => w(r.label))), room - fixed - w(tag)))
   return all.flatMap(({ i, r }) => {
     if (!r) return loose(i.label, i.note, room)
     const label = cut(r.label, lw)
@@ -539,7 +554,7 @@ function claims(s: Spec, room: number): Line[] {
       { t: '●'.repeat(dots), tone: 'data' }, { t: '○'.repeat(5 - dots), tone: 'dim' },
       { t: ' ' + ' '.repeat(vw - w(r.text)) + r.text },
       r.up ? { t: ' ▲', tone: 'ok' } : r.down ? { t: ' ▼', tone: 'bad' } : { t: '  ' },
-      ...(r.contested ? [{ t: '  ⚡ contested', tone: 'warn' as Tone }] : []),
+      ...(r.contested ? [{ t: tag, tone: 'warn' as Tone }] : []),
     ]
     return noted(row, i.note, room)
   })
@@ -644,9 +659,12 @@ function changeLines(list: Change[], since: number, room: number): Line[] {
   return out
 }
 
-/** The framed visual, fitted to `columns` (capped at 72). A living one shows its version and what changed since `living.base`. */
+/** The narrowest a frame is drawn: about what a phone held upright fits in the mobile app's code font. */
+export const MIN_WIDTH = 28
+
+/** The framed visual, fitted to `columns` (between MIN_WIDTH and 72). A living one shows its version and what changed since `living.base`. */
 export function draw(spec: Spec, columns = 80, living?: Living): Line[] {
-  const width = Math.max(40, Math.min(72, columns))
+  const width = Math.max(MIN_WIDTH, Math.min(72, columns))
   const room = width - 3
   const body =
     spec.form === 'flow' ? flow(spec, room)
