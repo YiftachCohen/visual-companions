@@ -1,8 +1,16 @@
 # visual-companions
 
+<p align="center"><img src="docs/art/hero.svg" alt="A Claude Code reply opening with a flow visual: release blocked at the migrate step. Boo, above the prompt, turns red and asks whether to batch the migration." width="100%"></p>
+
 A Claude Code plugin that adds a small visual to replies that report a result, a blocker or a decision.
 
+```
+/plugin install visual-companions --marketplace YiftachCohen/visual-companions
+```
+
 The agent opens such a reply with a short ` ```viz ` block. The plugin draws that block as a framed terminal visual above the prose. A line above the prompt shows what the work is for and where it landed, so you can see the state of a session at a glance when you switch back to it. It leads with any question the agent is waiting on you to answer, and says when another session is waiting on you.
+
+<p align="center"><img src="docs/art/band.svg" alt="Five states of the band: working with a flock of agents, landed green, going in circles, needs you, and a file collision warning." width="100%"></p>
 
 When 10 minutes or more have passed since you last typed and work happened since, the line grows into a return card. The card says how long it has been, how long the agent worked, how many tool calls it made and how many agents finished. It also shows each visual since then as its glyph, the next step, and which files were edited:
 
@@ -23,6 +31,8 @@ The band also warns when two sessions edit the same file. If another session edi
 Before a compaction, the plugin asks the summary to keep what the visuals recorded: decisions (★), each goal's open blocker, and questions you haven't answered. Afterwards it leaves a dim line in the transcript (`⟲ Compacted · 112k → 18k tokens · asked to keep 2 decisions, 1 blocker · /catchup`) and a row in `/catchup` that opens as a card.
 
 `/catchup` gives the lay of the land in one pane:
+
+<p align="center"><img src="docs/art/catchup.svg" alt="The return card after 40 minutes away, agent lanes on one time scale, and the question waiting on you." width="100%"></p>
 
 - **Needs you**: questions the agent asked since you last typed.
 - **Goals**: each piece of work in the session, where it stands, and its latest headline. An open blocker belongs to its goal and clears when a newer status visual for that goal isn't red.
@@ -61,6 +71,8 @@ Updates arrive when the version changes. Claude Code doesn't auto-update third-p
 The plugin adds a ~250-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
 
 ## Forms
+
+<p align="center"><img src="docs/art/forms.svg" alt="All eight forms, each drawn by the plugin from the few lines of source shown under it." width="100%"></p>
 
 The first line names the form and states the headline as a claim. A line starting with `>` ends the visual with what to do next or why it matters. Start it with `> ?` when the agent needs your decision or answer to go on: the band and `/catchup` list it under *Needs you* until you type.
 
@@ -106,6 +118,8 @@ A fence whose first word is not a known form is left as a normal code block.
 ```
 
 ### Living visuals
+
+<p align="center"><img src="docs/art/living.svg" alt="A living tree visual redrawn from v1 to v3, each version listing what changed since the last." width="100%"></p>
 
 A visual with `@ id=<name>` is one the agent keeps updating as the work moves: a plan, a hypothesis tree, a board. Each redraw with the same id is a new version. The title shows the version, and a list under the body says what changed since the previous one. Rows are matched by label, or by most of their words when the agent rewords one, so rewording doesn't show as a row removed and another added.
 
@@ -161,6 +175,8 @@ claude --plugin-dir .          # load it from a checkout
 claude plugin validate .
 claude plugin test .
 ```
+
+The images in this README are drawn by the plugin's own renderer. `bun docs/art/build.ts` redraws them; add `--png` for 2× stills in `docs/art/png/` (needs Google Chrome), or `--big` to draw them with big Boo into `docs/art/big-boo/`.
 
 Loading the plugin generates `.claude-plugin/types/`, which `tsconfig.json` extends. After that, `tsc -p . --noEmit` type-checks the plugin.
 
