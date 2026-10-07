@@ -6,7 +6,7 @@ import { small, smallCells } from './boo-small'
 import { change, changes, coverage, cutWords, draw, mood, parse, plain, split, w } from './render'
 import { card, checkpointCard, clashText, collisions, crowded, keepInstructions, lanes, noticeText, place, spinning } from './land'
 import type { Checkpoint } from './land'
-import { byGoal, goalOf, goalReply, headline, inTranscript, keepOf, outcome, sinceSeen, skillGoal, stepOf, waiting } from './register'
+import { byGoal, goalOf, goalReply, headline, inTranscript, keepOf, lastAt, outcome, sinceSeen, skillGoal, stepOf, waiting } from './register'
 
 const FLOW = `flow Release is blocked at the migrate step
 + build
@@ -683,6 +683,52 @@ test('/catchup names another session by its id when its folder entry is from an 
   const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
   expect(await ui.find({ type: 'Text', text: /object Object/ })).toBe(undefined)
   expect(await ui.find({ type: 'Text', text: /^s2abcdef$/ })).not.toBe(undefined)
+})
+
+test('a stored value says when it was last written', () => {
+  expect(lastAt(1_000)).toBe(1_000)
+  expect(lastAt([{ at: 1 }, { at: 5 }])).toBe(5)
+  expect(lastAt({ dir: 'web', at: 7 })).toBe(7)
+  expect(lastAt('web')).toBe(0)
+  expect(lastAt(undefined)).toBe(0)
+})
+
+test('session start drops every stale session, including ones that never drew a visual', async ($, on) => {
+  const DAY = 86_400_000
+  const now = 100 * DAY
+  const store = new Map<string, unknown>([
+    // Stale: a session that only started (old folder format, no time), and one you typed in long ago.
+    ['d:gone1', 'web'],
+    ['d:gone2', { dir: 'api', at: now - 40 * DAY }], ['p:gone2', now - 40 * DAY],
+    // Recent: one that only started, one with only a prompt, one whose visuals are recent.
+    ['d:kept1', { dir: 'api', at: now - DAY }],
+    ['p:kept2', now - DAY],
+    ['d:kept3', 'web'], ['h:kept3', [at(now - DAY, FLOW)]],
+  ])
+  on('session.id', () => ({ value: 'me' }))
+  on('session.root', () => ({ value: '/work/visual-companions' }) as any)
+  on('clock.now', () => ({ value: now }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.get', (_, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('store.delete', (_, e: any) => (store.delete(e.key), { value: undefined }) as any)
+  on('command.register', () => ({ value: undefined }) as any)
+  on('session.start', (_, e: any) => e)
+  on('ui.status', () => ({ value: undefined }) as any)
+  await $.session.start({ cwd: '/work/visual-companions' } as any)
+  expect([...store.keys()].sort()).toEqual(['d:kept1', 'd:kept3', 'd:me', 'h:kept3', 'p:kept2'])
+  expect(store.get('d:me')).toEqual({ dir: 'visual-companions', at: now })
+})
+
+test('/catchup names other sessions from either folder format', async ($, on) => {
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 600_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.keys', () => ({ value: ['h:s1', 'h:s2', 'd:s2', 'h:s3', 'd:s3'] }))
+  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': [at(0, FLOW)], 'h:s2': [at(500_000, FLOW)], 'd:s2': 'web', 'h:s3': [at(500_000, FLOW)], 'd:s3': { dir: 'api', at: 1 } } as any)[e.key] }))
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
+  expect(await ui.find({ type: 'Text', text: /^web$/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /^api$/ })).not.toBe(undefined)
 })
 
 test('a goal Haiku names after the turn ended is given to the visuals since that prompt', async ($, on) => {
