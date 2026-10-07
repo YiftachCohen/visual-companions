@@ -3,8 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import { big, booMood } from './boo'
 import type { Companion, Look } from './boo'
 import { small } from './boo-small'
-import { card, checkpointCard, cutsOf, keepInstructions, NOTICE, noticeText, ribbon, span, tokens, turnsOf } from './land'
-import type { Checkpoint, Kept, Turn } from './land'
+import { card, checkpointCard, commandKey, cutsOf, keepInstructions, lanes, noticeText, ribbon, RIBBON_MIN, span, spinning, tokens, turnsOf } from './land'
+import type { Checkpoint, Kept, Lane, Turn } from './land'
 import { cut, cutWords, draw, mood, split, w } from './render'
 import type { Line, Spec, Tone } from './render'
 import type { AgentNote, Now } from './contract'
@@ -61,6 +61,7 @@ export const register: Register = (on, options) => {
   // Band notes are written in order but off the tool's path: a tool never waits on them.
   let notes: Promise<unknown> = Promise.resolve()
   let prompts = 0 // bumped per prompt: a goal Haiku names late for an older prompt is dropped
+  let said = '' // how the agent's last reply ended: a "yes" to its proposal is new work, which Haiku can only tell from this
   const note = (f: () => Promise<unknown>) => void (notes = notes.then(f).catch(() => {}))
 
   // When you last typed: visuals after it are what you missed. Notifications,
@@ -71,12 +72,15 @@ export const register: Register = (on, options) => {
       const at = await $.clock.now()
       await $.store.set(`p:${id}`, at)
       if (held.cache?.id === id) held.cache.seen = at
+      // You've seen where things stand: the thrash alarm counts afresh from here.
+      fails.clear()
+      edits.clear()
       if (!activity) return next(e) // no goal: nothing names it, and no Haiku call
       const goal = goalOf(e.text)
       const turn = ++prompts
       if (goal) note(() => $.state.set(NOW, { goal }))
       // Haiku can answer after the turn has ended: the visuals saved since this prompt take its goal then.
-      else void nameGoal($, e.text).then(g => { if (g && turn === prompts) note(async () => { await merge($, { goal: g }); await regoal($, held, at, g) }) })
+      else void nameGoal($, e.text, said).then(g => { if (g && turn === prompts) note(async () => { await merge($, { goal: g }); await regoal($, held, at, g) }) })
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // never let bookkeeping block a prompt
@@ -133,7 +137,9 @@ export const register: Register = (on, options) => {
     // Read while drawing, so each tool call redraws the band.
     const live = activity ? ((await $.state.get(NOW)).value ?? null) : null
     const head = working ? [live?.goal, progress(live)].filter(Boolean).join(' · ') : ''
-    const step = working ? live?.step : undefined
+    // Going in circles outranks the step: it is the one thing in the band that asks you to look.
+    const spin = working ? spinning(fails, edits, now) : undefined
+    const step = working ? (spin ?? live?.step) : undefined
     const busy = !!(head || step)
     const n = await running($)
     const agents = n ? `${n} agent${n === 1 ? '' : 's'} running` : ''
@@ -156,7 +162,7 @@ export const register: Register = (on, options) => {
 
     if (e.surface !== 'terminal' || !companion) {
       const { Box, Text } = $.ui.resolve(e)
-      if (busy) return <Text wrap="truncate-end">{segs(Text, doing(head, step, agents, cols))}</Text>
+      if (busy) return <Text wrap="truncate-end">{segs(Text, doing(head, step, agents, cols, !!spin))}</Text>
       const line = (
         <Text key="band" wrap="truncate-end">
           <Text color={MOOD[shown.mood]} dimColor={!MOOD[shown.mood]}>{shown.mood} </Text>
@@ -175,7 +181,7 @@ export const register: Register = (on, options) => {
     }
 
     const { Box, Text, Raster } = $.ui.resolve(e)
-    const m = working ? 'working' : shown.stuck !== undefined ? 'relieved' : booMood(shown.spec)
+    const m = spin ? 'mixed' : working ? 'working' : shown.stuck !== undefined ? 'relieved' : booMood(shown.spec)
     const since = workingSince ?? last.at
     const { requestId } = e
     const { columns, rows } = companion
@@ -206,11 +212,11 @@ export const register: Register = (on, options) => {
     // Two rows: the goal above and the step dim below; idle, the outcome above and the goal dim below.
     const body: Seg2[][] =
       rows === 1
-        ? [busy ? doing(head, step, agents, room) : landed(live?.goal, shown.title, meta, room)]
+        ? [busy ? doing(head, step, agents, room, !!spin) : landed(live?.goal, shown.title, meta, room)]
         : busy && head
-          ? [doing(head, undefined, agents, room), ...(step ? [[{ t: `› ${cut(step, room - 2)}`, dim: true }]] : [])]
+          ? [doing(head, undefined, agents, room), ...(step ? [spin ? [{ t: cut(step, room), color: COLOR.warn }] : [{ t: `› ${cut(step, room - 2)}`, dim: true }]] : [])]
           : busy
-            ? [doing('', step, agents, room), [{ t: cutWords(shown.title, room), dim: true }]]
+            ? [doing('', step, agents, room, !!spin), [{ t: cutWords(shown.title, room), dim: true }]]
             : [[{ t: cutWords(shown.title, room) }], [{ t: cutWords([live?.goal, meta].filter(Boolean).join(' · '), room), dim: true }]]
     body.push(...extra.map(toned))
     return (
@@ -231,22 +237,31 @@ export const register: Register = (on, options) => {
   on('agent.spawn', async ($, e, next) => {
     const r = await next(activity ? { ...e, prompt: `${e.prompt}\n\n${HEADLINE}` } : e)
     $.ui.invalidate('ui.render')
+    // When it started, for its lane in /catchup.
+    const id = (r as { agentId?: unknown }).agentId
+    if (activity && typeof id === 'string') note(async () => noteAgent($, id, { at: await $.clock.now() }))
     return r
   }).catch(($, e, next) => next(e))
 
-  // What the agent is on, from its own tool calls: no model tokens (only a plain prompt's goal costs a Haiku call). A skill names
-  // the goal only when nothing else has (one the model loads mid-task, like a design guide, is a means, not the goal);
-  // its task list the task in progress, any other tool the step.
+  // What the agent is on, from its own tool calls: no model tokens (only a plain prompt's goal costs a Haiku call). Its task
+  // list names the task in progress, any other tool the step. A skill the model loads is a step too, never the goal: one
+  // loaded mid-task (a design guide) is a means, and as the goal it outlived the work it was loaded for.
   const tasks = new Map<string, { wording: string; done: boolean }>() // task id → its in-progress wording, from TaskCreate
   const counts = () => ({ done: [...tasks.values()].filter(t => t.done).length, total: tasks.size })
   // This turn's work for the ribbon and the return card: tool calls (bookkeeping aside, agents' included) and files edited.
   let turnTools = 0
   let turnFiles = new Set<string>()
+  // The thrash alarm's record: each command's failures in a row, each file's edit times.
+  const fails = new Map<string, number[]>()
+  const edits = new Map<string, number[]>()
   on('tool.call', async ($, e, next) => {
     const a = e as unknown as Record<string, any>
     if (stepOf(a) !== undefined) turnTools++
     const file = EDITS.has(e.tool) ? (a.file_path ?? a.notebook_path) : undefined
-    if (typeof file === 'string' && file) turnFiles.add(file)
+    if (typeof file === 'string' && file) {
+      turnFiles.add(file)
+      note(async () => edits.set(file, [...(edits.get(file) ?? []), await $.clock.now()].slice(-20)))
+    }
     if (!activity) return next(e)
     // A subagent's or teammate's call: only its step, kept per agent for /catchup.
     if (e.agentId !== undefined) {
@@ -255,10 +270,7 @@ export const register: Register = (on, options) => {
       if (step) note(async () => noteAgent($, id, { step, at: await $.clock.now() }))
       return next(e)
     }
-    if (e.tool === 'Skill') {
-      const goal = skillGoal(String(a.skill ?? ''), String(a.args ?? ''))
-      if (goal) note(async () => { if (!(await $.state.get(NOW)).value?.goal) await merge($, { goal, task: undefined }) })
-    } else if (e.tool === 'TodoWrite') {
+    if (e.tool === 'TodoWrite') {
       const todos = (a.todos as Array<{ status: string; activeForm?: string; content: string }> | undefined) ?? []
       const t = todos.find(t => t.status === 'in_progress')
       const done = todos.filter(t => t.status === 'completed').length
@@ -292,6 +304,22 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e)) // never let the note hold up a tool
 
+  // The thrash alarm's record of a shell command's failures in a row, kept once it has run; a success
+  // clears them. Agents' commands count too.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const r = await next(e)
+    // After `next` nothing may throw, and nothing here has a `.catch` to run the tool again.
+    try {
+      const command = (e as unknown as Record<string, unknown>).command
+      if (typeof command === 'string' && !('deny' in r && r.deny)) {
+        const key = commandKey(command)
+        if (r.isError) fails.set(key, [...(fails.get(key) ?? []), await $.clock.now()].slice(-20))
+        else if (fails.delete(key)) $.ui.invalidate('ui.render')
+      }
+    } catch {}
+    return r
+  })
+
   on('prompt.compose', async ($, e, next) => {
     const out = await next(e)
     if (!guide || e.surfaces.length === 0) return out // visuals off, or headless (-p, SDK) where none would be drawn: don't ask for one
@@ -321,12 +349,15 @@ export const register: Register = (on, options) => {
   // Remember the turn's visual: the headline above the prompt + history for /catchup.
   on('turn.complete', async ($, e, next) => {
     // The goal outlasts the turn: idle, the band shows it, and Haiku reads it to tell a follow-up from new work.
-    if (e.agentId === undefined) note(() => merge($, { task: undefined, done: undefined, total: undefined, step: undefined }))
+    if (e.agentId === undefined) {
+      said = ending(e.answer)
+      note(() => merge($, { task: undefined, done: undefined, total: undefined, step: undefined }))
+    }
     else {
       // A subagent answered: what it found, for /catchup. Its status settles just after.
       const id = e.agentId
       const result = headline(e.answer)
-      if (activity && result) note(async () => noteAgent($, id, { result, step: undefined, at: await $.clock.now() }))
+      if (activity) note(async () => { const at = await $.clock.now(); await noteAgent($, id, { ...(result ? { result } : {}), step: undefined, at, end: at }) })
       $.ui.invalidate('ui.render')
       $.clock.after(1000, () => $.ui.invalidate('ui.render'))
     }
@@ -361,8 +392,8 @@ export const register: Register = (on, options) => {
   })
 
   // Compaction is where the agent forgets and the scrollback goes: ask the summary to keep what the
-  // visuals say was decided, is blocked or waits on you, then mark the spot in the transcript,
-  // the ribbon and /catchup. No model tokens: the summarizer reads a few lines more.
+  // visuals say was decided, is blocked or waits on you, then mark the spot with a line in the
+  // transcript, a mark in the ribbon and a card in /catchup. No model tokens: the summarizer reads a few lines more.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     const h = await history($, held)
@@ -377,21 +408,12 @@ export const register: Register = (on, options) => {
       const cp: Checkpoint = { ...c, notice: noticeText(c) }
       h.cuts = [...h.cuts, cp].slice(-20)
       await $.store.set(`c:${h.id}`, h.cuts)
-      // Once the compacted conversation is in place, so the marker lands after it.
-      $.clock.after(500, () => void $.session.append({ message: { type: 'system', content: [{ type: 'text', text: cp.notice }] } }).catch(() => {}))
+      // A dim transcript line the model never reads, once the compacted conversation is in place so it lands after it.
+      $.clock.after(500, () => $.ui.log(cp.notice))
       $.ui.invalidate('ui.render')
     } catch {}
     return r
   }).catch(($, e, next) => next(e))
-
-  // The marker as the checkpoint's card, where the transcript draws it as a notice.
-  on('ui.render', { component: 'InfoNotice' }, async ($, e, next) => {
-    if (!e.props.text.startsWith(NOTICE)) return next(e)
-    const c = (await history($, held)).cuts.find(c => c.notice === e.props.text)
-    if (!c) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
-    return <Box flexDirection="column" paddingLeft={2}>{visual({ Box, Text }, checkpointCard(c, (e.viewport?.columns ?? 80) - 2))}</Box>
-  })
 
   on('command.run', { command: 'catchup' }, async $ => {
     open = null
@@ -423,7 +445,7 @@ export const register: Register = (on, options) => {
     // The history newest first, the compactions in among the visuals.
     const rest: Array<Saved | Checkpoint> = [...saved.filter(s => s !== picked), ...cuts.filter(c => c !== pickedCut)].sort((a, b) => b.at - a.at)
     const list = all ? rest : rest.slice(0, RECENT)
-    const strip = turns.length >= 3 ? ribbon(turns, cols, now, seen, cuts.map(c => c.at)) : []
+    const strip = turns.length >= RIBBON_MIN ? ribbon(turns, cols, now, seen, cuts.map(c => c.at)) : []
     const room = (used: number) => Math.max(10, cols - used)
     const glyph = (g: string) => <Text color={MOOD[g]} dimColor={!MOOD[g]}>{g} </Text>
     const head = (t: string) => <Text bold>{t}</Text>
@@ -463,7 +485,13 @@ export const register: Register = (on, options) => {
             })}
           </Box>
         )}
-        {crew.length > 0 && (
+        {crew.length > 0 && crew.some(a => a.start !== undefined) && (
+          <Box flexDirection="column" marginTop={1}>
+            {head('Agents')}
+            {visual({ Box, Text }, lanes(crew, cols, now))}
+          </Box>
+        )}
+        {crew.length > 0 && !crew.some(a => a.start !== undefined) && (
           <Box flexDirection="column" marginTop={1}>
             {head('Agents')}
             {crew.map(a => (
@@ -585,14 +613,16 @@ Given the current goal and the developer's new message, reply with exactly one o
 - A new goal of 2 to 6 words, sentence case, no trailing period, no quotes, when the message asks for work with its own subject or reports something broken. Name the work, not the wording.
 - NONE, when there is no current goal and the message has no clear task.
 A message that picks the next piece of a larger plan is new work: name that piece.
+When the message approves or picks something the assistant's last reply proposed, judge by what was proposed: new work gets its own goal.
 Examples:
 Current goal: Fix Safari login redirect / Message: yes, go ahead -> SAME
 Current goal: Fix Safari login redirect / Message: use a 302 instead -> SAME
 Current goal: Plan onboarding redesign / Message: let's build the welcome screen and the invite step first -> Build welcome screen and invite step
-Current goal: Add dark mode toggle / Message: the toggle doesn't persist after reload -> Fix dark mode persistence`
+Current goal: Add dark mode toggle / Message: the toggle doesn't persist after reload -> Fix dark mode persistence
+Current goal: Plan visual ideas / Assistant ended: Shall I start with a live test run? / Message: yes -> Live test the plugin`
 
 /** A plain prompt's goal, named by Haiku with the current goal as context: the current one when it says SAME, undefined when it can't say. */
-async function nameGoal($: EngineInterface, text: string): Promise<string | undefined> {
+async function nameGoal($: EngineInterface, text: string, said = ''): Promise<string | undefined> {
   const plain = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\[(Image|Pasted text) #\d+[^\]]*\]/g, '[attachment]').replace(/\s+/g, ' ').trim()
   if (!plain || plain === '[attachment]') return undefined
   try {
@@ -600,7 +630,7 @@ async function nameGoal($: EngineInterface, text: string): Promise<string | unde
     const r = await $.model.complete({
       model: 'haiku',
       system: GOAL_SYSTEM,
-      prompt: `Current goal: ${cur ?? '(none)'}\n\nNew message:\n${plain.slice(0, 2000)}`,
+      prompt: `Current goal: ${cur ?? '(none)'}\n\n${said ? `The assistant's last reply ended:\n${said}\n\n` : ''}New message:\n${plain.slice(0, 2000)}`,
       maxTokens: 30,
       effort: 'low',
       timeoutMs: 8000,
@@ -611,6 +641,9 @@ async function nameGoal($: EngineInterface, text: string): Promise<string | unde
     return undefined
   }
 }
+
+/** The end of a reply, where a proposal or question sits: code and visuals left out, at most 400 characters. */
+export const ending = (answer: string) => answer.replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trim().slice(-400)
 
 /** Haiku's reply as a goal: SAME keeps `cur`; NONE, a question or a sentence is no goal. */
 export function goalReply(text: string, cur: string | undefined): string | undefined {
@@ -659,10 +692,16 @@ function progress(now: Now | null): string | undefined {
   return [now?.task, of].filter(Boolean).join(' ') || undefined
 }
 
-/** What the agent is on, in `n` cells: the goal and task, the step only when there is neither, and the agents dim. */
-function doing(head: string, step: string | undefined, agents: string, n: number): Seg2[] {
+/** What the agent is on, in `n` cells: the goal and task, the step only when there is neither, and the agents dim.
+ *  When `spin` (the step is the thrash alarm), the alarm leads in amber and the goal follows dim. */
+function doing(head: string, step: string | undefined, agents: string, n: number, spin = false): Seg2[] {
   const tail = agents && w(agents) + 3 <= n - 16 ? [{ t: ` · ${agents}`, dim: true }] : []
   const room = n - (tail.length ? w(tail[0].t) : 0)
+  if (spin && step) {
+    const alarm = cut(step, room)
+    const rest = room - w(alarm) - 3
+    return [{ t: alarm, color: COLOR.warn }, ...(head && rest >= 12 ? [{ t: ` · ${cutWords(head, rest)}`, dim: true }] : []), ...tail]
+  }
   return [{ t: head ? cutWords(head, room) : step ? `› ${cut(step, room - 2)}` : '' }, ...tail]
 }
 
@@ -746,11 +785,11 @@ async function regoal($: EngineInterface, held: Held, since: number, goal: strin
   } catch {}
 }
 
-/** Folds `patch` into one agent's note; keeps the 20 heard from last. Swallows its failures, as merge does. */
+/** Folds `patch` into one agent's note, its start the first time it was heard from; keeps the 20 heard from last. Swallows its failures, as merge does. */
 async function noteAgent($: EngineInterface, id: string, patch: Partial<AgentNote> & { at: number }) {
   try {
     const cur = (await $.state.get(AGENTS)).value ?? {}
-    const all = Object.entries({ ...cur, [id]: { ...cur[id], ...patch } }).sort((a, b) => b[1].at - a[1].at)
+    const all = Object.entries({ ...cur, [id]: { ...cur[id], ...patch, start: cur[id]?.start ?? patch.start ?? patch.at } }).sort((a, b) => b[1].at - a[1].at)
     await $.state.set(AGENTS, Object.fromEntries(all.slice(0, 20)))
   } catch {}
 }
@@ -775,7 +814,8 @@ async function agentRows($: EngineInterface, now: number) {
       .map(a => {
         const n = notes[a.id] as AgentNote | undefined
         const detail = live(a.status) ? (n?.step ?? a.description) : (n?.result ?? n?.step ?? a.description)
-        return { id: a.id, glyph: AGENT_MOOD[a.status] ?? '◆', name: a.name || a.description || a.type, detail, at: n?.at, live: live(a.status) }
+        const row: Lane & { id: string; at?: number } = { id: a.id, glyph: AGENT_MOOD[a.status] ?? '◆', name: a.name || a.description || a.type, detail, at: n?.at, start: n?.start, end: n?.end ?? n?.at, live: live(a.status) }
+        return row
       })
       .sort((a, b) => Number(b.live) - Number(a.live) || (b.at ?? 0) - (a.at ?? 0))
       .slice(0, 6)
@@ -826,6 +866,7 @@ export function stepOf(e: Record<string, unknown>): string | undefined {
     case 'NotebookEdit': return `Editing ${base(e.notebook_path)}`
     case 'Grep': return `Searching for ${quoted(e.pattern)}`
     case 'Glob': return `Finding ${quoted(e.pattern)}`
+    case 'Skill': return str('skill') ? `Using the ${human(String(str('skill')).split(':').at(-1)!)} skill` : 'Using a skill'
     case 'Agent': case 'Task': return str('description') ? `Delegating: ${str('description')}` : 'Starting an agent'
     case 'WebSearch': return `Searching the web for ${quoted(e.query)}`
     case 'WebFetch': return `Fetching ${/^https?:\/\/([^/]+)/.exec(str('url') ?? '')?.[1] ?? 'a page'}`

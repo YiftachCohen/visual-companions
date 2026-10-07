@@ -12,6 +12,8 @@ export type AgentNote = {
   at: number // when it was last heard from
   step?: string // its latest tool call, as a few words
   result?: string // the first line of its answer, once it has answered
+  start?: number // when it was spawned, or first heard from
+  end?: number // when it last answered
 }
 
 declare module 'claude-code' {

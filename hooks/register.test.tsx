@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
 import { small, smallCells } from './boo-small'
 import { change, cutWords, draw, mood, parse, plain, split, w } from './render'
-import { card, checkpointCard, keepInstructions, noticeText, place, ribbon } from './land'
+import { card, checkpointCard, keepInstructions, lanes, noticeText, place, ribbon, spinning } from './land'
 import type { Checkpoint } from './land'
 import { byGoal, goalOf, goalReply, headline, keepOf, outcome, skillGoal, stepOf, waiting } from './register'
 
@@ -721,19 +721,38 @@ test("Haiku's SAME keeps the goal; NONE, a question or a sentence is none", asyn
   expect(goalReply('The developer is asking me to look at the status line and explain it', undefined)).toBe(undefined)
 })
 
-test("a skill the model loads names the goal only when there is none", async ($, on) => {
-  let state: any = { goal: 'Plan comprehension visuals' }
+test("a skill the model loads is a step, never the goal", async ($, on) => {
+  let state: any = {}
   on('state.get', () => ({ value: { value: state, version: 1 } }))
   on('state.set', (_, e: any) => { state = e.value; return { value: { version: 2 } } as any })
   on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
   const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
   await $.tool.call({ tool: 'Skill', skill: 'artifact-design' } as any).catch(() => {})
   await settle()
-  expect(state.goal).toBe('Plan comprehension visuals')
-  state = {}
-  await $.tool.call({ tool: 'Skill', skill: 'code-review' } as any).catch(() => {})
-  await settle()
-  expect(state.goal).toBe('Code review')
+  expect([state.goal, state.step]).toEqual([undefined, 'Using the Artifact design skill'])
+  // One the person runs as a slash command is still the goal.
+  expect(goalOf('/code-review')).toBe('Code review')
+})
+
+test("Haiku reads how the agent's last reply ended, so a yes to a proposal names the proposed work", async ($, on) => {
+  let prompt = ''
+  let state: any = { goal: 'Plan visual ideas' }
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 100 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('state.get', () => ({ value: { value: state, version: 1 } }))
+  on('state.set', (_, e: any) => { state = e.value; return { value: { version: 2 } } as any })
+  on('model.complete', (_, e: any) => { prompt = e.prompt; return { value: { isAnswered: true, text: 'Live test the plugin' } } as any })
+  on('prompt.submit', (_, e: any) => ({ text: e.text }) as any)
+  on('turn.complete', () => ({ text: '' }))
+  await $.turn.complete({ answer: '```viz\nflow Next\n+ a\n```\nShall I start with the live test run?', durationMs: 1, isAborted: false, turnId: '1', reason: 'answer' } as any)
+  await $.prompt.submit({ text: 'Yes', wait: false, origin: { kind: 'composer' } } as any)
+  await new Promise(r => (globalThis as any).setTimeout(r, 20))
+  expect(prompt).toContain("The assistant's last reply ended:\nShall I start with the live test run?\n\nNew message:\nYes")
+  expect(prompt).not.toContain('```')
+  expect(state.goal).toBe('Live test the plugin')
 })
 
 // The session at a glance: ribbon, return card, compaction checkpoint.
@@ -744,18 +763,21 @@ const text = (lines: Array<Array<{ t: string }>>) => lines.map(l => l.map(s => s
 
 test('the ribbon is one bar per turn, as tall as its work, coloured by its outcome', async () => {
   const turns = [turn(0, 2, { goal: 'Map' }), turn(MIN, 40, { goal: 'Map', mood: '✓' }), turn(2 * MIN, 10, { goal: 'Fix race', mood: '✗' }), turn(3 * MIN, 0, { goal: 'Fix race' })]
-  const lines = ribbon(turns, 60, 4 * MIN, 1.5 * MIN)
-  const [bars, names] = lines
-  expect(text([bars])).toBe(' 4m ▃▃██▅▅▁▁ now')
-  // The turn's visual sets its colour; turns from before you last typed are dim, later ones plain.
-  expect(bars.find(s => s.t === '██')?.tone).toBe('ok')
-  expect(bars.find(s => s.t === '▅▅')?.tone).toBe('bad')
-  expect(bars.find(s => s.t.includes('▃▃'))?.tone).toBe('dim')
-  expect(bars.find(s => s.t === '▁▁')?.tone).toBe(undefined)
-  // Each goal's stretch is named under it where the name fits; a long name needs more room than three cells.
-  expect(text([names])).toBe('    Map')
-  const wide = ribbon(turns, 40, 4 * MIN)
-  expect(text([wide[1]])).toMatch(/^ {4}Map/)
+  const [bars] = ribbon(turns, 60, 4 * MIN, 1.5 * MIN)
+  // One cell per turn, never lower than ▂ (the one-eighth block reads as an underline).
+  expect(text([bars])).toBe(' 4m ▃█▅▂ now')
+  // Only green and red outcomes colour a bar; turns from before you last typed are dim, later ones plain.
+  expect(bars.find(s => s.t === '█')?.tone).toBe('ok')
+  expect(bars.find(s => s.t === '▅')?.tone).toBe('bad')
+  expect(bars.find(s => s.t.includes('▃'))?.tone).toBe('dim')
+  expect(bars.find(s => s.t === '▂')?.tone).toBe(undefined)
+  expect(ribbon([turn(0, 3, { mood: '★' }), turn(MIN, 3, { mood: '◉' })], 40, 2 * MIN)[0].some(s => s.tone === 'pick' || s.tone === 'warn')).toBe(false)
+  // Two goals or more: each stretch is named under it where the name fits.
+  const long = [...Array.from({ length: 9 }, (_, i) => turn(i * MIN, 3, { goal: 'Map auth' })), ...Array.from({ length: 7 }, (_, i) => turn((9 + i) * MIN, 3, { goal: 'Fix the race' }))]
+  // Names are cut between words only.
+  expect(text([ribbon(long, 60, 16 * MIN)[1]])).toBe('    Map auth Fix…')
+  // One goal throughout: no names, they would only repeat it.
+  expect(ribbon(long.map(t => ({ ...t, goal: 'Map auth' })), 60, 16 * MIN).length).toBe(1)
 })
 
 test('the ribbon marks compactions and lets the oldest turns go when it runs out of room', async () => {
@@ -778,7 +800,8 @@ test('edited files read as names, or as a count and the folder they share', asyn
 
 test('the return card says how long, how much work, what came in, what is next and where the edits landed', async () => {
   const saved = [at(1 * MIN, FLOW), at(30 * MIN, 'flow Cache warmed\n+ a'), at(40 * MIN, 'flow Fixed\n+ a')]
-  const turns = [turn(MIN, 5), turn(30 * MIN, 12, { mood: '✓', files: ['/r/hooks/a.ts'] }), turn(40 * MIN, 30, { mood: '✓', files: ['/r/hooks/b.ts', '/r/hooks/c.ts'] })]
+  const early = Array.from({ length: 6 }, (_, k) => turn(k * 10_000, 2))
+  const turns = [...early, turn(MIN, 5), turn(30 * MIN, 12, { mood: '✓', files: ['/r/hooks/a.ts'] }), turn(40 * MIN, 30, { mood: '✓', files: ['/r/hooks/b.ts', '/r/hooks/c.ts'] })]
   const i = { now: 47 * MIN, seen: 5 * MIN, saved, turns, cuts: [], agentsDone: 2, next: 'Ship it after review.', root: '/r' }
   const all = text(card(i, 80, 10))
   expect(all).toContain('42m since you typed · worked 2m · 42 tool calls · 2 agents finished')
@@ -792,6 +815,8 @@ test('the return card says how long, how much work, what came in, what is next a
   expect(two).toContain('since you typed')
   expect(two).toContain('→ Ship it')
   expect(card(i, 80, 0)).toEqual([])
+  // Under eight turns there is no ribbon.
+  expect(text(card({ ...i, turns: turns.slice(-3) }, 80, 10))).not.toMatch(/now$/m)
 })
 
 function away($: any, on: any, seen: number) {
@@ -925,35 +950,129 @@ test("a precompute or a subagent's compaction leaves no checkpoint", async ($, o
 
 const CUT: Checkpoint = { at: 9_000, trigger: 'auto', before: 120_000, after: 20_000, kept: { decisions: ['Self-host'], blockers: [], asks: [] }, notice: '⟲ Compacted · 120k → 20k tokens · asked to keep 1 decision · /catchup' }
 
-test("the transcript's compaction marker draws as the checkpoint card", async ($, on) => {
-  on('session.id', () => ({ value: 's1' }))
-  on('store.get', (_, e: any) => ({ value: ({ 'c:s1': [CUT] } as any)[e.key] }))
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>engine notice</Text>
-  })
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'InfoNotice', props: { text: CUT.notice, command: null } as any })
-    expect(await ui.find({ type: 'Text', text: /Compacted · asked the summary to keep 1/ })).not.toBe(undefined)
-    expect(await ui.find({ type: 'Text', text: /Self-host/ })).not.toBe(undefined)
-    const other = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'InfoNotice', props: { text: 'Conversation compacted', command: null } as any })
-    expect(await other.find({ type: 'Text', text: /engine notice/ })).not.toBe(undefined)
-  }
-})
-
 test('/catchup opens with the ribbon and lists compactions among the visuals', async ($, on) => {
   const hist = [at(1_000, FLOW, 'Migrate users'), at(20_000, 'flow Fixed\n+ a', 'Migrate users')]
-  const turns = [turn(1_000, 4, { mood: '✗', goal: 'Migrate users' }), turn(5_000, 9, { goal: 'Migrate users' }), turn(20_000, 2, { mood: '✓', goal: 'Migrate users' })]
+  const turns = [...Array.from({ length: 6 }, (_, k) => turn(100 + k, 1)), turn(1_000, 4, { mood: '✗', goal: 'Migrate users' }), turn(5_000, 9, { goal: 'Migrate users' }), turn(20_000, 2, { mood: '✓', goal: 'Migrate users' })]
   on('session.id', () => ({ value: 's1' }))
   on('clock.now', () => ({ value: 30_000 }))
   on('clock.after', () => ({ deny: 'no timers in this test' }))
   on('store.keys', () => ({ value: ['h:s1'] }))
   on('store.get', (_, e: any) => ({ value: ({ 'h:s1': hist, 'p:s1': 25_000, 't:s1': turns, 'c:s1': [CUT] } as any)[e.key] }))
   const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
-  expect(await ui.find({ type: 'Text', text: /3 turns/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /9 turns/ })).not.toBe(undefined)
   expect(await ui.find({ type: 'Text', text: /╎/ })).not.toBe(undefined)
   expect(await ui.find({ type: 'Text', text: / now$/ })).not.toBe(undefined)
   expect(await ui.find({ type: 'Button', text: /^Compacted · 120k → 20k tokens · 1 kept$/ })).not.toBe(undefined)
   await ui.press({ key: `c:${CUT.at}` })
   expect(await ui.find({ type: 'Text', text: /Compacted · asked the summary to keep 1/ })).not.toBe(undefined)
+})
+
+// Agent lanes and the thrash alarm.
+
+test('agents draw as lanes: a track from start to answer, a live one to now, its mark and what it found', async () => {
+  const rows = [
+    { name: 'explore', glyph: '✓', start: 0, end: 8 * MIN, live: false, detail: 'found 3 entry points' },
+    { name: 'plan', glyph: '◉', start: 3 * MIN, live: true, detail: 'Editing plan.md' },
+    { name: 'codex', glyph: '✗', start: 7 * MIN, end: 14 * MIN, live: false, detail: 'auth.spec fails on CI' },
+    { name: 'tests', glyph: '◆', live: false },
+  ]
+  const out = lanes(rows, 90, 20 * MIN).map(l => l.map(s => s.t).join(''))
+  expect(out[0]).toMatch(/^ {9}20m ago +now$/)
+  const at = (row: string, ch: string) => out.find(l => l.startsWith(row))!.indexOf(ch)
+  // Tracks start where the agent did, on one time scale.
+  expect(at('explore', '━')).toBeLessThan(at('plan', '━'))
+  expect(at('plan', '━')).toBeLessThan(at('codex', '━'))
+  // A live agent runs to now, at the right end; a finished one ends at its answer.
+  expect(at('plan', '◉')).toBe(out[0].indexOf('w') )
+  expect(at('explore', '✓')).toBeLessThan(at('codex', '✗'))
+  expect(out.find(l => l.startsWith('codex'))).toContain('auth.spec fails on CI')
+  // One never heard from has no track, only its mark.
+  expect(out.find(l => l.startsWith('tests'))).not.toContain('━')
+  // The live track is amber; a failed agent's detail is red.
+  const plan = lanes(rows, 90, 20 * MIN)[2]
+  expect(plan.find(s => s.t.includes('━'))?.tone).toBe('warn')
+})
+
+test('the thrash alarm wants one command failing three times in a row; edits alone never raise it', async () => {
+  const now = 20 * MIN
+  const edits = new Map([['/r/hooks/render.ts', [1, 2, 3, 4, 5, 6, 7].map(k => now - k * MIN)]])
+  expect(spinning(new Map(), edits, now)).toBe(undefined)
+  expect(spinning(new Map([['npm test', [now - 2 * MIN, now - MIN]]]), edits, now)).toBe(undefined)
+  const fails = new Map([['npm test', [now - 9 * MIN, now - 5 * MIN, now - 2 * MIN, now - MIN]]])
+  expect(spinning(fails, edits, now)).toBe('⟳ “npm test” failed 4× in a row · 9m · render.ts edited 7×')
+  // Failures older than the window don't count.
+  expect(spinning(new Map([['npm test', [0, MIN, 2 * MIN]]]), new Map(), 60 * MIN)).toBe(undefined)
+})
+
+function spinBand($: any, on: any) {
+  const spec = parse(FLOW)!
+  let failing = true
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 10_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.get', (_: unknown, e: any) => ({ value: e.key === 'h:s1' ? [{ at: 0, title: spec.title, mood: '✗', spec }] : undefined }))
+  on('state.get', () => ({ value: { value: { goal: 'Fix token refresh' }, version: 1 } }))
+  on('tool.call', () => (failing ? { result: { stdout: '', stderr: 'FAIL', interrupted: false }, isError: true, text: 'FAIL' } : { result: { stdout: 'ok', stderr: '', interrupted: false }, text: 'ok' }) as any)
+  const run = async (command: string) => { await $.tool.call({ tool: 'Bash', command, description: 'Run the tests' } as any).catch(() => {}) }
+  return { run, pass: () => { failing = false } }
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`three failures in a row of one command put the alarm in the band while working (${surface})`, async ($, on) => {
+    const { run, pass } = spinBand($, on)
+    const props = { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 120 } as any
+    for (let k = 0; k < 2; k++) await run('npm   test')
+    let ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+    expect(await ui.find({ type: 'Text', text: /⟳/ })).toBe(undefined)
+    await run('npm test')
+    ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+    expect(await ui.find({ type: 'Text', text: /⟳ “npm test” failed 3× in a row/ })).not.toBe(undefined)
+    // A success of that command clears it.
+    pass()
+    await run('npm test')
+    ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+    expect(await ui.find({ type: 'Text', text: /⟳/ })).toBe(undefined)
+  })
+}
+
+test("each agent's lane is kept: when it was spawned and when it answered", async ($, on) => {
+  let agents: any = null
+  let now = 1_000
+  on('clock.now', () => ({ value: now }))
+  on('state.get', (_, e: any) => ({ value: { value: e.key === 'agents' ? agents : null, version: 1 } }))
+  on('state.set', (_, e: any) => { if (e.key === 'agents') agents = e.value; return { value: { version: 2 } } as any })
+  on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: 'ag1' }) as any)
+  on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
+  on('turn.complete', () => ({ text: '' }))
+  on('store.get', () => ({ value: undefined }))
+  const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
+  await $.agent.spawn({ prompt: 'Find stale docs', description: 'Docs audit' } as any)
+  await settle()
+  now = 5_000
+  await $.tool.call({ tool: 'Read', file_path: '/a/b.ts', agentId: 'ag1' } as any).catch(() => {})
+  await settle()
+  now = 9_000
+  await $.turn.complete({ answer: 'Found 3 stale pages', agentId: 'ag1', durationMs: 1, isAborted: false, turnId: '2', reason: 'answer' } as any)
+  await settle()
+  expect([agents.ag1.start, agents.ag1.end, agents.ag1.result]).toEqual([1_000, 9_000, 'Found 3 stale pages'])
+})
+
+test('/catchup draws the agents as lanes once their start is known', async ($, on) => {
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 600_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.keys', () => ({ value: ['h:s1'] }))
+  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': [at(1_000, FLOW)] } as any)[e.key] }))
+  on('agent.list', () => ({ value: [
+    { id: 'ag1', name: 'explore-auth', description: 'Explore auth', type: 'Explore', status: 'completed' },
+    { id: 'ag2', name: 'planner', description: 'Plan', type: 'Plan', status: 'running' },
+  ] }) as any)
+  on('state.get', (_, e: any) => ({ value: { value: e.key === 'agents' ? {
+    ag1: { at: 300_000, start: 100_000, end: 300_000, result: 'Found 3 entry points' },
+    ag2: { at: 590_000, start: 200_000, step: 'Editing plan.md' },
+  } : null, version: 1 } }))
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
+  expect(await ui.find({ type: 'Text', text: /8m ago +now/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /explore-auth +━+✓ +Found 3 entry points/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /planner +━+◉ +Editing plan\.md/ })).not.toBe(undefined)
 })

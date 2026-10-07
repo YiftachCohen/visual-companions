@@ -16,15 +16,24 @@ Fix token refresh → Refresh race fixed, tests green  12m ago
     Map the…    Hunt the…    Fix and…    Write docs
 ```
 
+While the agent works, the band watches for it going in circles. When one shell command fails three times in a row within 15 minutes, with no success in between, the band leads with `⟳ “npm test” failed 4× in a row · 9m`. It also names the file edited most in that time when it was edited five times or more. Boo turns amber and stops moving. The next success of that command clears it. Heavy editing alone never raises it. A command piped into another (`npm test | tail`) reports the last command's exit code, so its failures may not count.
+
 The ribbon is the session on one line: one bar per turn. A bar's height is the number of tool calls in that turn, its agents' calls included. Its colour is the outcome of the visual the turn drew. Turns from before you last typed are dim, and `╎` marks a compaction. Each stretch of work on one goal is named under its bars. When rows are short, the ribbon gives way first.
 
-Before a compaction, the plugin asks the summary to keep what the visuals recorded: decisions (★), each goal's open blocker, and questions you haven't answered. Afterwards it leaves a marker in the transcript (`⟲ Compacted · 112k → 18k tokens · asked to keep 2 decisions, 1 blocker · /catchup`), drawn as a card where the transcript draws notices. The marker also appears in the ribbon and in `/catchup`.
+Before a compaction, the plugin asks the summary to keep what the visuals recorded: decisions (★), each goal's open blocker, and questions you haven't answered. Afterwards it leaves a dim line in the transcript (`⟲ Compacted · 112k → 18k tokens · asked to keep 2 decisions, 1 blocker · /catchup`), a `╎` in the ribbon, and a row in `/catchup` that opens as a card.
 
 `/catchup` gives the lay of the land in one pane, under the ribbon:
 
 - **Needs you**: questions the agent asked since you last typed.
 - **Goals**: each piece of work in the session, where it stands, and its latest headline. An open blocker belongs to its goal and clears when a newer status visual for that goal isn't red.
-- **Agents**: each subagent or teammate, with what it is doing now or what it found.
+- **Agents**: each subagent or teammate as a lane on one time scale, from when it started to when it answered (a running one to now), with what it is doing now or what it found:
+
+  ```
+                20m ago                      now
+  explore-auth  ━━━━━━━━━━━━✓                     Found 3 entry points
+  planner            ━━━━━━━━━━━━━━━━━━━━━━━━━━◉  Editing plan.md
+  codex-review             ━━━━━━━━━━━✗           auth.spec fails on CI
+  ```
 - **Other sessions**: other sessions with a visual in the last day, those waiting on you first.
 - One visual in full, then the earlier ones, with compactions among them. Press any headline to open it.
 

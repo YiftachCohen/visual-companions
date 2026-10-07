@@ -31,8 +31,12 @@ export const tokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : S
 
 // ── ribbon ───────────────────────────────────────────────────────────────
 
-const LEVELS = '▁▂▃▄▅▆▇█'
+// No bar lower than ▂: the one-eighth block reads as an underline in many fonts.
+const LEVELS = '▂▃▄▅▆▇█'
 const CUT = '╎' // a compaction, between the turns it fell between
+const BAR_TONE: Record<string, Tone> = { '✓': 'ok', '✗': 'bad' } // only a turn that landed green or red is coloured
+/** Below this many turns a ribbon says nothing a glance at the transcript doesn't. */
+export const RIBBON_MIN = 8
 
 /** Joins neighbouring segments of one tone, so a ribbon is a few segments, not one per cell. */
 function joined(segs: Seg[]): Line {
@@ -46,10 +50,11 @@ function joined(segs: Seg[]): Line {
 }
 
 /**
- * The session in `room` cells: one bar per turn, as tall as its tool calls (square-root
- * scaled, so one long turn doesn't flatten the rest), coloured by its visual's outcome;
- * turns from before you last typed are dim. A `╎` marks each compaction. Under it, each
- * stretch of one goal is named where the name fits. The oldest turns give way first.
+ * The session in `room` cells: one cell per turn, as tall as its tool calls (square-root
+ * scaled, so one long turn doesn't flatten the rest), green or red when its visual landed
+ * that way; turns from before you last typed are dim. A `╎` marks each compaction. Under
+ * it, when the work spans two goals or more, each stretch is named where the name fits.
+ * The oldest turns give way first.
  */
 export function ribbon(turns: Turn[], room: number, now: number, seen = -Infinity, cuts: number[] = []): Line[] {
   if (turns.length === 0) return []
@@ -57,9 +62,8 @@ export function ribbon(turns: Turn[], room: number, now: number, seen = -Infinit
   if (avail < 4) return []
   const before = (i: number) => cuts.filter(c => (i === 0 ? -Infinity : turns[i - 1].at) < c && c <= turns[i].at).length
   const after = cuts.filter(c => c > turns[turns.length - 1].at).length
-  const k = turns.length * 2 + cuts.length <= avail ? 2 : 1
-  let first = Math.max(0, turns.length - Math.floor(avail / k))
-  const width = (from: number) => (turns.length - from) * k + after + turns.slice(from).reduce((n, _, j) => n + (j === 0 ? 0 : before(from + j)), 0)
+  let first = Math.max(0, turns.length - avail)
+  const width = (from: number) => turns.length - from + after + turns.slice(from).reduce((n, _, j) => n + (j === 0 ? 0 : before(from + j)), 0)
   while (first < turns.length - 1 && width(first) > avail) first++
   const shown = turns.slice(first)
   const top = Math.max(1, ...shown.map(t => t.tools))
@@ -71,15 +75,14 @@ export function ribbon(turns: Turn[], room: number, now: number, seen = -Infinit
     const marks = j === 0 ? 0 : before(first + j)
     if (marks) { bars.push({ t: CUT.repeat(marks), tone: 'data' }); col += marks }
     starts.push(col)
-    const glyph = LEVELS[Math.round(Math.sqrt(Math.max(0, t.tools) / top) * (LEVELS.length - 1))]
-    bars.push({ t: glyph.repeat(k), tone: MOOD_TONE[t.mood ?? ''] ?? (t.at <= seen ? 'dim' : undefined) })
-    col += k
+    bars.push({ t: LEVELS[Math.round(Math.sqrt(Math.max(0, t.tools) / top) * (LEVELS.length - 1))], tone: BAR_TONE[t.mood ?? ''] ?? (t.at <= seen ? 'dim' : undefined) })
+    col += 1
   })
   if (after) bars.push({ t: CUT.repeat(after), tone: 'data' })
   const label = span(now - shown[0].at).padStart(3) + ' '
   const out: Line[] = [joined([{ t: label, tone: 'dim' }, ...bars, { t: ' now', tone: 'dim' }])]
 
-  // Chapters: runs of one goal, named where the name fits whole, or cut where at least five cells of it fit.
+  // Chapters: runs of one goal, each named with as many whole words as fit.
   const names: Seg[] = []
   let at = 0
   let odd = false
@@ -89,17 +92,29 @@ export function ribbon(turns: Turn[], room: number, now: number, seen = -Infinit
     const goal = shown[j].goal
     const end = e + 1 < shown.length ? starts[e + 1] : col
     const fit = end - starts[j] - 1
-    if (goal && (w(goal) <= fit || fit >= 6)) {
+    const name = goal ? wholeWords(goal, fit) : ''
+    if (name) {
       names.push({ t: ' '.repeat(starts[j] - at) })
-      const name = cutWords(goal, fit)
       names.push({ t: name, tone: odd ? 'dim' : undefined })
       at = starts[j] + w(name)
       odd = !odd
     }
     j = e + 1
   }
-  if (names.some(s => s.t.trim())) out.push(joined([{ t: ' '.repeat(w(label)) }, ...names]))
+  if (new Set(shown.map(t => t.goal).filter(Boolean)).size >= 2 && names.some(s => s.t.trim())) out.push(joined([{ t: ' '.repeat(w(label)) }, ...names]))
   return out
+}
+
+/** `s` in `n` cells, cut only between words (`Map auth flow` → `Map auth…`); '' when not even its first word fits. */
+function wholeWords(s: string, n: number): string {
+  if (w(s) <= n) return s
+  let out = ''
+  for (const word of s.split(/\s+/)) {
+    const next = out ? `${out} ${word}` : word
+    if (w(next) + 1 > n) break
+    out = next
+  }
+  return out ? out + '…' : ''
 }
 
 // ── return card ──────────────────────────────────────────────────────────
@@ -159,7 +174,7 @@ export function card(i: CardIn, room: number, rows: number): Line[] {
   }
   if (i.next) out.push({ line: [{ t: '→ ', tone: 'dim' }, { t: cutWords(i.next, room - 2) }], rank: 1 })
   if (files.length) out.push({ line: [{ t: '✎ ', tone: 'data' }, { t: cut(place(files, i.root), room - 2) }], rank: 2 })
-  if (i.turns.length >= 3) ribbon(i.turns, room, i.now, i.seen, i.cuts).forEach((line, k) => out.push({ line, rank: 4 + k }))
+  if (i.turns.length >= RIBBON_MIN) ribbon(i.turns, room, i.now, i.seen, i.cuts).forEach((line, k) => out.push({ line, rank: 4 + k }))
   const keep = out.map(o => o.rank).sort((a, b) => a - b).slice(0, Math.max(0, rows))
   const cutoff = keep.length ? keep[keep.length - 1] : -1
   return out.filter(o => o.rank <= cutoff).map(o => o.line)
@@ -181,7 +196,7 @@ export function keepInstructions(k: Kept): string | undefined {
   ].filter(Boolean).join('\n')
 }
 
-export const NOTICE = '⟲ Compacted'
+const NOTICE = '⟲ Compacted'
 
 /** The transcript's one-line marker: `⟲ Compacted · 112k → 18k tokens · asked to keep 2 decisions, 1 blocker · /catchup`. */
 export function noticeText(c: Omit<Checkpoint, 'notice'>): string {
@@ -214,4 +229,74 @@ export function checkpointCard(c: Checkpoint, columns = 80): Line[] {
     [{ t: '│', tone: rail }, { t: '  ' + size, tone: 'dim' }],
     [{ t: '╰─→ ', tone: rail }, { t: cutWords('Visuals from before stay in /catchup.', width - 4) }],
   ]
+}
+
+// ── agent lanes ──────────────────────────────────────────────────────────
+
+/** One subagent or teammate: when it was first and last heard from, and how it stands. */
+export type Lane = { name: string; glyph: string; start?: number; end?: number; live: boolean; detail?: string }
+
+const LANE_TONE: Record<string, Tone> = { '✓': 'ok', '✗': 'bad', '◉': 'warn', '◆': 'dim' }
+
+/**
+ * Agents as a timeline: one track each from when it started to when it answered (a live
+ * one runs to now), its mark where it stands, and what it is on or found beside it. An
+ * agent the plugin never heard from has no track, only its mark at the right.
+ */
+export function lanes(rows: Lane[], room: number, now: number): Line[] {
+  if (rows.length === 0) return []
+  const nw = Math.min(16, Math.max(...rows.map(r => w(r.name))))
+  const track = Math.max(10, Math.min(32, room - nw - 2 - 2 - 24))
+  const starts = rows.flatMap(r => (r.start !== undefined ? [r.start] : []))
+  const t0 = starts.length ? Math.min(...starts) : now
+  const total = Math.max(60_000, now - t0)
+  const col = (t: number) => Math.max(0, Math.min(track - 1, Math.round(((t - t0) / total) * (track - 1))))
+  const pad = ' '.repeat(nw + 2)
+  const left = `${span(now - t0)} ago`
+  const axis: Line = [{ t: pad + left + ' '.repeat(Math.max(1, track - w(left) - 3)) + 'now', tone: 'dim' }]
+  const out: Line[] = [axis]
+  for (const r of rows) {
+    const name = cut(r.name, nw)
+    const tone = LANE_TONE[r.glyph] ?? 'dim'
+    const segs: Seg[] = [{ t: name + ' '.repeat(nw - w(name) + 2) }]
+    if (r.start === undefined) segs.push({ t: ' '.repeat(track - 1) }, { t: r.glyph, tone })
+    else {
+      const s = col(r.start)
+      const e = Math.max(s, r.live ? track - 1 : col(r.end ?? r.start))
+      segs.push({ t: ' '.repeat(s) }, { t: '━'.repeat(e - s), tone: r.live ? 'warn' : tone }, { t: r.glyph, tone }, { t: ' '.repeat(track - 1 - e) })
+    }
+    if (r.detail) segs.push({ t: '  ' }, { t: cutWords(r.detail, Math.max(8, room - nw - 2 - track - 2)), tone: r.glyph === '✗' ? 'bad' : 'dim' })
+    out.push(joined(segs.filter(s => s.t)))
+  }
+  return out
+}
+
+// ── thrash alarm ─────────────────────────────────────────────────────────
+
+const WINDOW = 15 * 60_000 // repeats count within this
+const REPEATS = 3 // failures in a row of one command before it reads as going in circles
+
+/** A shell command as one key: spaces collapsed. */
+export const commandKey = (cmd: string) => cmd.trim().replace(/\s+/g, ' ')
+
+/**
+ * The agent going in circles, as a line for the band, or undefined: one command that has
+ * failed REPEATS times in a row (no success between) within WINDOW, and the file edited
+ * most in that window when it was edited five times or more. Edits alone never raise it:
+ * heavy editing is ordinary work.
+ */
+export function spinning(fails: Map<string, number[]>, edits: Map<string, number[]>, now: number): string | undefined {
+  let worst: { cmd: string; times: number[] } | undefined
+  for (const [cmd, times] of fails) {
+    const recent = times.filter(t => now - t <= WINDOW)
+    if (recent.length >= REPEATS && (!worst || recent.length > worst.times.length)) worst = { cmd, times: recent }
+  }
+  if (!worst) return undefined
+  let file: { name: string; n: number } | undefined
+  for (const [path, times] of edits) {
+    const n = times.filter(t => now - t <= WINDOW).length
+    if (n >= 5 && (!file || n > file.n)) file = { name: base(path), n }
+  }
+  const took = span(now - worst.times[0])
+  return [`⟳ “${cut(worst.cmd, 32)}” failed ${worst.times.length}× in a row · ${took}`, file ? `${file.name} edited ${file.n}×` : ''].filter(Boolean).join(' · ')
 }
