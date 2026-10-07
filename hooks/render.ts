@@ -258,8 +258,25 @@ function list(s: Spec, room: number): Line[] {
   return out
 }
 
+const EXPLORED = new Set<Status>(['done', 'dropped', 'blocked']) // looked into: confirmed, ruled out, or stuck
+
+/** The leaves under item `n` (all of them for -1): items with no children of their own. */
+function leaves(it: Item[], n: number): Item[] {
+  const depth = n === -1 ? -1 : it[n].depth
+  const out: Item[] = []
+  for (let k = n + 1; k < it.length && it[k].depth > depth; k++) if (!(it[k + 1]?.depth > it[k].depth)) out.push(it[k])
+  return out
+}
+
+/** `3/5 explored` over a tree's marked leaves; '' when fewer than three leaves carry a mark. */
+export function coverage(it: Item[], n = -1): string {
+  const marked = leaves(it, n).filter(i => i.status !== null)
+  return marked.length >= (n === -1 ? 3 : 2) ? `${marked.filter(i => EXPLORED.has(i.status)).length}/${marked.length} explored` : ''
+}
+
 function tree(s: Spec, room: number): Line[] {
   const it = s.items
+  const roots = it.filter(i => i.depth === 0).length
   const rows: Array<{ left: Line; under: Line; note?: string }> = []
   const open: boolean[] = [] // per depth: does a later sibling follow?
   it.forEach((i, n) => {
@@ -272,7 +289,9 @@ function tree(s: Spec, room: number): Line[] {
     // A note on its own line keeps the lines that pass it: siblings below, and this item's children.
     const under = (i.depth > 0 ? stem + (isLast ? '   ' : '│  ') : '') + ((it[n + 1]?.depth ?? 0) > i.depth ? '│ ' : '  ')
     if (i.depth > 0) stem += isLast ? '╰─ ' : '├─ '
-    rows.push({ left: [{ t: stem, tone: 'dim' }, mark(i.status), sp(1), { t: i.label, tone: i.depth === 0 ? 'title' : i.status === 'blocked' ? 'bad' : undefined }], under: [{ t: under, tone: 'dim' }], note: i.note })
+    // A branch shows how much of it has been explored, unless it is the whole tree (that is in the title) or has a note.
+    const covered = i.depth === 0 && roots === 1 ? '' : coverage(it, n)
+    rows.push({ left: [{ t: stem, tone: 'dim' }, mark(i.status), sp(1), { t: i.label, tone: i.depth === 0 ? 'title' : i.status === 'blocked' ? 'bad' : undefined }], under: [{ t: under, tone: 'dim' }], note: i.note ?? (covered || undefined) })
   })
   const col = Math.max(...rows.map(r => lineW(r.left))) + 2
   return rows.flatMap(r => (r.note ? leader(r.left, r.note, col, room, r.under) : [r.left]))
@@ -640,7 +659,7 @@ export function draw(spec: Spec, columns = 80, living?: Living): Line[] {
     : tradeoff(spec, room)
   const rail = mood(spec).tone
   const done = spec.items.filter(i => i.status === 'done').length
-  const progress = spec.form === 'flow' || spec.form === 'path' ? `${done}/${spec.items.filter(i => i.status !== 'dropped').length}` : ''
+  const progress = spec.form === 'flow' || spec.form === 'path' ? `${done}/${spec.items.filter(i => i.status !== 'dropped').length}` : spec.form === 'tree' ? coverage(spec.items) : ''
   const meta = [progress, living && living.version > 1 ? `v${living.version}` : ''].filter(Boolean).map(m => '  ' + m).join('')
   const out: Line[] = [[{ t: '╭─ ', tone: rail }, { t: cutWords(spec.title, width - 3 - w(meta)), tone: 'title' }, ...(meta ? [{ t: meta, tone: 'dim' as Tone }] : [])], [{ t: '│', tone: rail }]]
   for (const l of body) out.push([{ t: '│', tone: rail }, ...(l.length ? [sp(2), ...l] : [])])

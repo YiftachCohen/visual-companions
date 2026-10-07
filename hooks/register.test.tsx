@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
 import { small, smallCells } from './boo-small'
-import { change, changes, cutWords, draw, mood, parse, plain, split, w } from './render'
+import { change, changes, coverage, cutWords, draw, mood, parse, plain, split, w } from './render'
 import { card, checkpointCard, clashText, collisions, crowded, keepInstructions, lanes, noticeText, place, spinning } from './land'
 import type { Checkpoint } from './land'
 import { byGoal, goalOf, goalReply, headline, inTranscript, keepOf, outcome, sinceSeen, skillGoal, stepOf, waiting } from './register'
@@ -1133,7 +1133,7 @@ test('a living visual lists what changed since an earlier version: new, status, 
 
 test('a living visual draws its version and the changes under the body', async () => {
   const out = plain(draw(parse(V3)!, 72, { version: 3, base: { version: 2, spec: parse(V2)! } }))
-  expect(out.split('\n')[0]).toMatch(/Safari login failure · 2 ruled out  v3$/)
+  expect(out.split('\n')[0]).toMatch(/Safari login failure · 2 ruled out  2\/3 explored  v3$/)
   expect(out).toContain('↻ since v2: 1 new · 1 changed · 1 removed')
   expect(out).toContain('◉ → ⊘  CORS preflight · not sent')
   expect(out).toContain('+ ITP partitioning')
@@ -1166,7 +1166,7 @@ test('a redrawn visual in the transcript shows what changed since its last versi
     return <Text>{(e.props as { text?: string }).text ?? ''}</Text>
   })
   const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'AssistantMessage', props: { text: '```viz\n' + V3 + '\n```\nNarrowed it down.', isFirstOfReply: true } as any })
-  expect(await ui.find({ type: 'Text', text: /2 ruled out  v3/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /2 ruled out  2\/3 explored  v3/ })).not.toBe(undefined)
   expect(await ui.find({ type: 'Text', text: /↻ since v2/ })).not.toBe(undefined)
 })
 
@@ -1205,4 +1205,32 @@ test('claims draw each claim with its confidence, which way it moves and whether
   // Nothing to plot: a code block, as other charts.
   expect(parse('claims Nothing\nsome prose')).toBe(null)
   expect(parse('claims Out of range\nA: 150%')).toBe(null)
+})
+
+// Plan coverage.
+
+test('a tree says how much of it has been explored, overall in the title and per branch', async () => {
+  const plan = `tree RAG research plan
+* retrieval quality
+  + chunk size | 512 wins
+  + hybrid search
+  . query rewriting
+* reranking
+  - cross-encoder only
+  . ColBERT
+. latency at 10k docs
+. cost model`
+  const out = plain(draw(parse(plan)!, 72)).split('\n')
+  // Leaves: chunk size, hybrid search, query rewriting, cross-encoder only, ColBERT, latency, cost model.
+  expect(out[0]).toMatch(/RAG research plan  3\/7 explored$/)
+  expect(out.find(l => l.includes('retrieval quality'))).toMatch(/2\/3 explored$/)
+  expect(out.find(l => l.includes('reranking'))).toMatch(/1\/2 explored$/)
+  // An agent's own note wins over the count.
+  expect(out.find(l => l.includes('chunk size'))).toContain('512 wins')
+  // One root holding the whole tree: its count is the title's, not repeated on the row.
+  const single = plain(draw(parse('tree Why\nx hit rate drops\n  + keys | confirmed\n  - eviction\n  . TTL')!, 72)).split('\n')
+  expect(single[0]).toMatch(/Why  2\/3 explored$/)
+  expect(single.find(l => l.includes('hit rate'))).not.toContain('explored')
+  // Under three marked leaves there is no count.
+  expect(coverage(parse('tree T\n+ a\n. b')!.items)).toBe('')
 })

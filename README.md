@@ -73,7 +73,7 @@ A `tradeoff` or `matrix` with a chosen option (`*`) counts as a decision and is 
 | `matrix` | options against several criteria | `postgres: + + ~ *`, options `@ cols=cost, scale, setup` (required) |
 | `claims` | what the evidence says, as it changes | `ColBERT fits 50ms p95: 0.5 v !` (confidence 0..1 or %, `^` rising, `v` falling, `!` contested) |
 
-In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked, `.` todo, `-` dropped. Keep flow step labels to about 14 characters so the steps fit on one track. Add `| note` to any row to attach a note.
+In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked, `.` todo, `-` dropped. Keep flow step labels to about 14 characters so the steps fit on one track. Add `| note` to any row to attach a note. A `tree` whose leaves carry marks says how much of it has been explored (✓, ⊘ or ✗) in its title, `3/7 explored`, and each branch with two leaves or more says it beside its label.
 
 ```
 ╭─ New ranking model trades latency for recall
