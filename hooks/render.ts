@@ -3,7 +3,7 @@
 //   flow Release is blocked at the migrate step     ← <form> <headline>
 //   + build                                         ← + done  * active  x blocked  . todo  - dropped
 //   x migrate | lock timeout above 10k rows         ← `| note`
-//   > Need a batching decision first.               ← so-what line
+//   > Need a batching decision first.               ← so-what line; `> ? …` asks the user
 //
 // tree: items indented 2 spaces per level.  delta: `label: before -> after +|-`
 // bars: `label: 89 *` with `@ unit=%; max=100; bar=85`.
@@ -15,7 +15,8 @@ export type Line = Seg[]
 export type Status = 'done' | 'active' | 'blocked' | 'todo' | 'dropped' | null
 
 type Item = { status: Status; label: string; note?: string; depth: number }
-export type Spec = { form: string; title: string; soWhat?: string; opts: Record<string, string>; items: Item[] }
+// ask: the so-what line is a question only the user can answer (`> ? …`).
+export type Spec = { form: string; title: string; soWhat?: string; ask?: boolean; opts: Record<string, string>; items: Item[] }
 
 export const FORMS = ['flow', 'path', 'tree', 'delta', 'bars', 'tradeoff', 'matrix']
 const STATUS: Record<string, Status> = { '+': 'done', '*': 'active', x: 'blocked', '.': 'todo', '-': 'dropped' }
@@ -34,7 +35,12 @@ export function parse(src: string): Spec | null {
   for (const raw of lines.slice(1)) {
     const depth = Math.floor((raw.length - raw.trimStart().length) / 2)
     const l = raw.trim()
-    if (l.startsWith('>')) { spec.soWhat = l.slice(1).trim(); continue }
+    if (l.startsWith('>')) {
+      const so = l.slice(1).trim()
+      spec.ask = so.startsWith('?') && so.length > 1
+      spec.soWhat = spec.ask ? so.slice(1).trim() : so
+      continue
+    }
     if (l.startsWith('@')) {
       for (const kv of l.slice(1).split(';')) {
         const [k, ...v] = kv.split('=')
@@ -142,6 +148,9 @@ export function mood(spec: Spec): { glyph: string; tone: Tone } {
   if (s.length && s.every(x => x === 'done' || x === 'dropped')) return { glyph: '✓', tone: 'ok' }
   if (spec.form === 'delta' && rest.some(r => /\s-$/.test(r))) return { glyph: '▼', tone: 'warn' }
   if (spec.form === 'delta' && rest.every(r => /\s\+$/.test(r))) return { glyph: '✓', tone: 'ok' }
+  // A chosen option is a decision: scanning history for what was decided finds these.
+  const pickRow = spec.form === 'tradeoff' ? pointRow : spec.form === 'matrix' ? matrixRow : undefined
+  if (pickRow && rest.some(r => pickRow(r)?.chosen)) return { glyph: '★', tone: 'pick' }
   return { glyph: '◆', tone: 'dim' }
 }
 
@@ -508,13 +517,15 @@ export function draw(spec: Spec, columns = 80): Line[] {
     : tradeoff(spec, room)
   const rail = mood(spec).tone
   const done = spec.items.filter(i => i.status === 'done').length
-  const meta = spec.form === 'flow' ? `  ${done}/${spec.items.filter(i => i.status !== 'dropped').length}` : ''
+  const meta = spec.form === 'flow' || spec.form === 'path' ? `  ${done}/${spec.items.filter(i => i.status !== 'dropped').length}` : ''
   const out: Line[] = [[{ t: '╭─ ', tone: rail }, { t: cutWords(spec.title, width - 3 - w(meta)), tone: 'title' }, ...(meta ? [{ t: meta, tone: 'dim' as Tone }] : [])], [{ t: '│', tone: rail }]]
   for (const l of body) out.push([{ t: '│', tone: rail }, ...(l.length ? [sp(2), ...l] : [])])
   out.push([{ t: '│', tone: rail }])
   if (spec.soWhat) {
-    const [first, ...more] = wrap(spec.soWhat, width - 4)
-    out.push([{ t: '╰─→ ', tone: rail }, { t: first }], ...more.map(l => [sp(4), { t: l }]))
+    // A question for the user stands out from a plain next step: it is what they must act on.
+    const [first, ...more] = wrap(spec.soWhat, width - 4 - (spec.ask ? 2 : 0))
+    const lead: Line = spec.ask ? [{ t: '╰─ ', tone: rail }, { t: '? ', tone: 'pick' }, { t: first, tone: 'title' }] : [{ t: '╰─→ ', tone: rail }, { t: first }]
+    out.push(lead, ...more.map(l => [sp(spec.ask ? 5 : 4), { t: l, tone: spec.ask ? ('title' as Tone) : undefined }]))
   }
   else out.push([{ t: '╰─', tone: rail }])
   return out

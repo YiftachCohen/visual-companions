@@ -7,8 +7,15 @@ export type Now = {
   step?: string // the tool it is running
 }
 
+/** What each subagent or teammate was last seen doing, by its `$.agent.list()` id. */
+export type AgentNote = {
+  at: number // when it was last heard from
+  step?: string // its latest tool call, as a few words
+  result?: string // the first line of its answer, once it has answered
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'visual-companions': { now: Now | null }
+    'visual-companions': { now: Now | null; agents: Record<string, AgentNote> | null }
   }
 }

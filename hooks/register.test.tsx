@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
 import { small, smallCells } from './boo-small'
 import { change, cutWords, draw, mood, parse, plain, split, w } from './render'
-import { goalOf, skillGoal, stepOf } from './register'
+import { byGoal, goalOf, headline, outcome, skillGoal, stepOf, waiting } from './register'
 
 const FLOW = `flow Release is blocked at the migrate step
 + build
@@ -526,4 +526,140 @@ test('colour picks mood, mono or claude', async () => {
 test('the colour option reaches the band', { options: { companion: 'big', booColor: 'claude' } }, async ($, on) => {
   const boo = (await (await band($, on)).find({ type: 'Raster' })) as any
   expect(boo?.props.cells).toBe(big.draw('blocked', 10_000, { palette: 'claude', effects: true }))
+})
+
+// ── catching up: questions, goals, agents, other sessions ────────────────
+
+const at = (n: number, src: string, goal?: string) => {
+  const spec = parse(src)!
+  return { at: n, title: spec.title, mood: mood(spec).glyph, spec, ...(goal ? { goal } : {}) }
+}
+const PANE = { title: 'Catch-up', isFocused: true, bodyColumns: 100, placement: 'dock' } as any
+
+test('"> ?" marks a question for the user, drawn apart from a next step', async () => {
+  const q = parse('flow Migration needs a call\n+ build\nx migrate\n> ? Batch by 1k rows or lock the table?')!
+  expect([q.ask, q.soWhat]).toEqual([true, 'Batch by 1k rows or lock the table?'])
+  expect(plain(draw(q))).toContain('╰─ ? Batch by 1k rows')
+  expect(parse('flow Plain\n+ a\n> Next: deploy')!.ask).toBe(false)
+  expect(parse('flow Lone mark\n+ a\n> ?')!.ask).toBe(false)
+})
+
+test('a chosen option is a decision; a highlighted bar is not', async () => {
+  expect(mood(parse('matrix Pick\n@ cols=a, b\npg: + ~ *\nlite: + x')!).glyph).toBe('★')
+  expect(mood(parse('tradeoff Pick\nA: 0.5 0.7 *\nB: 0.2 0.9')!).glyph).toBe('★')
+  expect(mood(parse('matrix Open\n@ cols=a\npg: +\nlite: x')!).glyph).toBe('◆')
+  expect(mood(parse('bars Hi\nA: 3 *\nB: 2')!).glyph).toBe('◆')
+})
+
+test('path shows its progress in the title like flow', async () => {
+  expect(plain(draw(parse('path P\n+ web\n+ api\nx auth\n. db')!))).toContain('P  2/4')
+})
+
+test("a blocker leads only for its own goal, until a newer status visual of that goal isn't red", async () => {
+  const red = at(1, FLOW, 'Migrate users')
+  // A chart after it doesn't clear it.
+  expect(outcome([red, at(2, 'bars B\nA: 1\nB: 2', 'Migrate users')])).toBe(red)
+  // A newer status visual of the goal does.
+  const fixed = at(3, 'flow Batched\n+ build\n* migrate', 'Migrate users')
+  expect(outcome([red, fixed, at(4, 'bars B\nA: 1', 'Migrate users')]).title).toBe('B')
+  // Work on another goal leads with that goal.
+  expect(outcome([red, at(5, 'bars Ranking eval\nA: 1', 'Ranking eval')]).title).toBe('Ranking eval')
+})
+
+test('a question waits until you type; history groups by goal, latest first', async () => {
+  const q = at(10, 'flow Q\n+ a\n> ? Which one?', 'G1')
+  expect(waiting([q], 5)).toBe(q)
+  expect(waiting([q], 20)).toBe(undefined)
+  const groups = byGoal([at(1, FLOW, 'G1'), at(2, FLOW, 'G2'), at(3, FLOW, 'G1')])
+  expect(groups.map(g => [g.goal, g.saved.length])).toEqual([['G1', 2], ['G2', 1]])
+})
+
+test("an answer in a line: its visual's headline, else its first line of prose", async () => {
+  expect(headline('```viz\n' + FLOW + '\n```\nmore')).toBe('Release is blocked at the migrate step')
+  expect(headline('\n## **Found 3 stale pages** in docs/\nrest')).toBe('Found 3 stale pages in docs/')
+  expect(headline('')).toBe(undefined)
+})
+
+test('the band leads with a question you have not answered', async ($, on) => {
+  const q = at(5_000, 'flow Migration needs a call\n+ build\nx migrate\n> ? Batch or lock?')
+  let seen = 0
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 10_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.get', (_, e: any) => ({ value: e.key === 'p:s1' ? seen : e.key === 'h:s1' ? [q] : undefined }))
+  const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100 } as any
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'desktop', component: 'AbovePrompt', props })
+  expect(await ui.find({ type: 'Text', text: /Needs you: Batch or lock\?/ })).not.toBe(undefined)
+})
+
+test('the band says when another session is waiting on you', async ($, on) => {
+  const q = at(5_000, 'flow Q\n+ a\n> ? Approve the schema?')
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 10_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.keys', () => ({ value: ['h:s1', 'h:s2', 'd:s2'] }))
+  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': [at(0, FLOW)], 'h:s2': [q], 'p:s2': 1_000, 'd:s2': 'api-server' } as any)[e.key] }))
+  const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 140 } as any
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'desktop', component: 'AbovePrompt', props })
+  expect(await ui.find({ type: 'Text', text: /1 other session needs you/ })).not.toBe(undefined)
+})
+
+test('a visual is saved with the goal it was drawn for', async ($, on) => {
+  const store = new Map<string, unknown>()
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 100 }))
+  on('store.get', (_, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('state.get', () => ({ value: { value: { goal: 'Migrate users' }, version: 1 } }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.turn.complete({ answer: '```viz\n' + FLOW + '\n```', durationMs: 1, isAborted: false, turnId: '1', reason: 'answer' } as any)
+  expect((store.get('h:s1') as Array<{ goal?: string }>)[0].goal).toBe('Migrate users')
+})
+
+test("each subagent's latest step and its answer are kept for /catchup", async ($, on) => {
+  let agents: any = null
+  on('clock.now', () => ({ value: 50 }))
+  on('state.get', (_, e: any) => ({ value: { value: e.key === 'agents' ? agents : null, version: 1 } }))
+  on('state.set', (_, e: any) => { if (e.key === 'agents') agents = e.value; return { value: { version: 2 } } as any })
+  on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
+  on('turn.complete', () => ({ text: '' }))
+  on('store.get', () => ({ value: undefined }))
+  const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
+  await $.tool.call({ tool: 'Read', file_path: '/a/token.ts', agentId: 'ag1' } as any).catch(() => {})
+  await settle()
+  expect(agents?.ag1?.step).toBe('Reading token.ts')
+  await $.turn.complete({ answer: 'Found the expired key in vault.\nDetails…', agentId: 'ag1', durationMs: 1, isAborted: false, turnId: '2', reason: 'answer' } as any)
+  await settle()
+  expect([agents?.ag1?.result, agents?.ag1?.step]).toEqual(['Found the expired key in vault.', undefined])
+})
+
+test('/catchup lays out questions, goals, agents and other sessions, then the history', async ($, on) => {
+  const hist = [
+    ...Array.from({ length: 9 }, (_, i) => at(1_000 + i, `bars Eval run ${i}\nA: ${i + 1}`, 'Ranking eval')),
+    at(2_000, FLOW, 'Migrate users'),
+    at(3_000, 'flow Migration needs a call\n+ build\nx migrate\n> ? Batch or lock?', 'Migrate users'),
+  ]
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 600_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.keys', () => ({ value: ['h:s1', 'h:s2', 'p:s2', 'd:s2'] }))
+  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': hist, 'p:s1': 0, 'h:s2': [at(500_000, FLOW, 'Ship web')], 'p:s2': 0, 'd:s2': 'web' } as any)[e.key] }))
+  on('agent.list', () => ({ value: [{ id: 'ag1', name: 'explore-auth', description: 'Explore auth', type: 'Explore', status: 'running' }] }) as any)
+  on('state.get', (_, e: any) => ({ value: { value: e.key === 'agents' ? { ag1: { at: 590_000, step: 'Reading token.ts' } } : null, version: 1 } }))
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
+  // Every visual since you typed counts as new, not just the ones listed.
+  expect(await ui.find({ type: 'Text', text: /^11 new$/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Button', text: /^Batch or lock\?$/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Button', text: /^Migrate users$/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Button', text: /^Ranking eval$/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /explore-auth/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /Reading token\.ts/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /^web$/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /Ship web → Release is blocked/ })).not.toBe(undefined)
+  // The history lists 8 and offers the rest.
+  expect(await ui.find({ type: 'Button', text: /^Show all 10$/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Button', text: /^Eval run 0$/ })).toBe(undefined)
+  await ui.press({ key: 'more' })
+  expect(await ui.find({ type: 'Button', text: /^Eval run 0$/ })).not.toBe(undefined)
 })

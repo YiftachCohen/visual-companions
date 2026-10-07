@@ -2,7 +2,15 @@
 
 A Claude Code plugin that adds a small visual to replies that report a result, a blocker or a decision.
 
-The agent opens such a reply with a short ` ```viz ` block. The plugin draws that block as a framed terminal visual above the prose. A line above the prompt shows what the work is for and where it landed, so you can see the state of a session at a glance when you switch back to it. `/catchup` lists the visuals from this session.
+The agent opens such a reply with a short ` ```viz ` block. The plugin draws that block as a framed terminal visual above the prose. A line above the prompt shows what the work is for and where it landed, so you can see the state of a session at a glance when you switch back to it. It leads with any question the agent is waiting on you to answer, and says when another session is waiting on you.
+
+`/catchup` gives the lay of the land in one pane:
+
+- **Needs you**: questions the agent asked since you last typed.
+- **Goals**: each piece of work in the session, where it stands, and its latest headline. An open blocker belongs to its goal and clears when a newer status visual for that goal isn't red.
+- **Agents**: each subagent or teammate, with what it is doing now or what it found.
+- **Other sessions**: other sessions with a visual in the last day, those waiting on you first.
+- One visual in full, then the earlier ones. Press any headline to open it.
 
 ```
 ╭─ Release is blocked at the migrate step  2/4
@@ -27,7 +35,9 @@ The plugin adds a ~200-token guide to the system prompt. It is cached with the r
 
 ## Forms
 
-The first line names the form and states the headline as a claim. A line starting with `>` ends the visual with what to do next or why it matters.
+The first line names the form and states the headline as a claim. A line starting with `>` ends the visual with what to do next or why it matters. Start it with `> ?` when the agent needs your decision or answer to go on: the band and `/catchup` list it under *Needs you* until you type.
+
+A `tradeoff` or `matrix` with a chosen option (`*`) counts as a decision and is marked ★ in the history.
 
 | Form | Use it for | Rows |
 | --- | --- | --- |
@@ -61,8 +71,8 @@ Every setting is a row in `/config`, and you can also set them when you install 
 | --- | --- | --- | --- |
 | `visuals` | on / off | on | Off removes the guide from the system prompt, so the agent stops writing visuals and the plugin uses no model tokens. |
 | `band` | on / off | on | The line above the prompt, with Boo: the goal and the latest headline, or an earlier ✗ when no ✓ has followed it, plus its age, how many visuals came in since you last typed, and how many agents are still running. |
-| `activity` | on / off | on | The band shows the goal; while the agent works, also its task and progress (`2/5`). The current tool step appears only when there's room (big Boo) or nothing else to show. Off also skips the small Haiku call that names a plain prompt's goal. |
-| `history` | 10 / 20 / 50 | 20 | How many visuals `/catchup` keeps per session. |
+| `activity` | on / off | on | The band shows the goal; while the agent works, also its task and progress (`2/5`). The current tool step appears only when there's room (big Boo) or nothing else to show. Off also skips the small Haiku call that names a plain prompt's goal, and stops tagging visuals with goals and noting what subagents do. |
+| `history` | 10 / 20 / 50 | 20 | How many visuals `/catchup` keeps per session. It lists the latest 8; *Show all* lists the rest. |
 | `retention` | 7 / 30 / 90 | 30 | Days before other sessions' visual history is deleted. |
 | `companion` | small / big / off | small | Boo's size: one row of braille, two rows of pixels, or a glyph only. |
 | `booAnimation` | animated / still | animated | Still shows one resting pose per mood and runs no timer. |

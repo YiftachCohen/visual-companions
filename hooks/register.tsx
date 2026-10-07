@@ -5,7 +5,7 @@ import type { Companion, Look } from './boo'
 import { small } from './boo-small'
 import { cut, cutWords, draw, mood, split, w } from './render'
 import type { Line, Spec, Tone } from './render'
-import type { Now } from './contract'
+import type { AgentNote, Now } from './contract'
 
 // Everything the model pays for is this section (cached with the system
 // prompt) plus the few dozen tokens of each ```viz block it writes.
@@ -14,17 +14,22 @@ const GUIDE = `Visual companions: when a message reports a finding, result, deci
 First line: <form> <headline as a claim>. Forms: flow (progress through steps), path (where in a system something happens: components in order), tree (causes or plan; indent 2 spaces per level), delta (what changed), bars (comparison), tradeoff (a choice on two axes), matrix (options against several criteria).
 flow/path/tree item marks: + done, * active, x blocked, . todo, - dropped. Keep flow step labels ≤14 chars. "label | note" adds a note.
 delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>", rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen).
-"> one line" ends it: why it matters or what's next.`
+"> one line" ends it: why it matters or what's next. "> ? question" instead when you need the user's decision or answer to go on.`
 
 const PANE = 'catchup'
+const RECENT = 8 // history rows /catchup lists before "Show all"
 const DAY = 86_400_000
 
 const NOW = { plugin: 'visual-companions', key: 'now' } as const
+const AGENTS = { plugin: 'visual-companions', key: 'agents' } as const
 
-type Saved = { at: number; title: string; mood: string; spec: Spec; stuck?: number } // stuck: ms blocked before this went green
+// stuck: ms blocked before this went green. goal: what the work was for when it was drawn.
+type Saved = { at: number; title: string; mood: string; spec: Spec; stuck?: number; goal?: string }
 
-// ◆ (neutral) has no colour: it draws dim.
-const MOOD: Record<string, string | undefined> = { '✗': 'error', '◉': 'warning', '▼': 'warning', '✓': 'success' }
+// ◆ (neutral) has no colour: it draws dim. ★ a decision, ? a question for you.
+const MOOD: Record<string, string | undefined> = { '✗': 'error', '◉': 'warning', '▼': 'warning', '✓': 'success', '★': 'claude', '?': 'claude' }
+// Forms that report where work stands; the latest of them for a goal is that goal's state.
+const STATUS_FORMS = new Set(['flow', 'path', 'tree'])
 const COLOR: Partial<Record<Tone, string>> = { ok: 'success', bad: 'error', warn: 'warning', data: 'suggestion', pick: 'claude' }
 
 const COMPANIONS: Record<string, Companion | undefined> = { small, big }
@@ -40,7 +45,8 @@ export const register: Register = (on, options) => {
   const activity = options.activity !== false
   const keep = Number(pick(String(options.history), ['10', '20', '50'], '20')) // visuals kept for /catchup
   const stale = Number(pick(String(options.retention), ['7', '30', '90'], '30')) * DAY // other sessions' history is dropped after this
-  let open: number | null = null // the `at` of the entry /catchup has expanded; null: the newest
+  let open: number | null = null // the `at` of the entry /catchup has expanded; null: the band's lead
+  let all = false // /catchup lists all of the history, not just the latest few
 
   const held: Held = { cache: null }
 
@@ -69,6 +75,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'catchup', description: "Show this session's recent visual companions" })
     $.ui.status(undefined) // the headline is drawn above the prompt instead
+    // Where this session runs, so another session's /catchup can name it.
+    try { await $.store.set(`d:${await $.session.id()}`, base(await $.session.root())) } catch {}
     try {
       const id = await $.session.id()
       const cutoff = (await $.clock.now()) - stale
@@ -76,21 +84,21 @@ export const register: Register = (on, options) => {
         if (!key.startsWith('h:') || key === `h:${id}`) continue
         const saved = (await $.store.get(key)) as Saved[] | undefined
         if ((saved?.at(-1)?.at ?? 0) < cutoff) {
-          await $.store.delete(key)
-          await $.store.delete(`p:${key.slice(2)}`)
+          for (const k of ['h', 'p', 'd']) await $.store.delete(`${k}:${key.slice(2)}`)
         }
       }
     } catch {} // housekeeping only
     return next(e)
   })
 
-  // Above the prompt, for someone switching back in: what the work is for, where it
-  // landed (an open blocker before any newer headline), what came in since they last
-  // typed, and any agents still running. While the model works: the goal and task,
+  // Above the prompt, for someone switching back in: a question waiting on them first,
+  // else what the work is for and where it landed (the goal's open blocker before any
+  // newer chart), what came in since they last typed, and any agents still running. While the model works: the goal and task,
   // with the step it is on given way to first. Boo sits beside it in the terminal.
   // The `companion` option picks small (braille, one row), big (two rows) or off;
   // the boo* options how it's painted and whether it moves.
   let workingSince: number | null = null
+  let away = { at: -Infinity, n: 0 } // other sessions waiting on you, and when that was counted
   let timer: { cancel: () => void } | null = null
   let aging: { cancel: () => void } | null = null
 
@@ -115,13 +123,18 @@ export const register: Register = (on, options) => {
     const n = await running($)
     const agents = n ? `${n} agent${n === 1 ? '' : 's'} running` : ''
 
-    const shown = outcome(hist.saved)
+    const ask = waiting(hist.saved, hist.seen)
+    const lead = ask ?? outcome(hist.saved)
+    const shown = ask ? { ...ask, mood: '?', title: `Needs you: ${ask.spec.soWhat}` } : lead
     const fresh = hist.saved.filter(s => s.at > hist.seen).length
-    const meta = [shown === last ? ago(now - shown.at) : `open ${span(now - shown.at)}`, fresh > 1 ? `${fresh} new · /catchup` : '', agents]
+    // Another session's question, looked up at most once a minute: the band redraws on every tool call.
+    if (now - away.at > 60_000) away = { at: now, n: (await otherSessions($, hist.id, now)).filter(o => o.ask).length }
+    const elsewhere = away.n ? `${away.n} other session${away.n === 1 ? ' needs' : 's need'} you` : ''
+    const meta = [ask || lead === last ? ago(now - lead.at) : `open ${span(now - lead.at)}`, elsewhere, fresh > 1 ? `${fresh} new · /catchup` : '', agents]
       .filter(Boolean)
       .join(' · ')
     // Idle, nothing else redraws the band: redraw it when the age it shows goes stale.
-    if (!working) aging = $.clock.after(now - shown.at < 3_600_000 ? 60_000 : 3_600_000, () => $.ui.invalidate('ui.render'))
+    if (!working) aging = $.clock.after(now - lead.at < 3_600_000 ? 60_000 : 3_600_000, () => $.ui.invalidate('ui.render'))
 
     if (e.surface !== 'terminal' || !companion) {
       const { Text } = $.ui.resolve(e)
@@ -196,8 +209,15 @@ export const register: Register = (on, options) => {
   const tasks = new Map<string, { wording: string; done: boolean }>() // task id → its in-progress wording, from TaskCreate
   const counts = () => ({ done: [...tasks.values()].filter(t => t.done).length, total: tasks.size })
   on('tool.call', async ($, e, next) => {
-    if (!activity || e.agentId !== undefined) return next(e)
+    if (!activity) return next(e)
     const a = e as unknown as Record<string, any>
+    // A subagent's or teammate's call: only its step, kept per agent for /catchup.
+    if (e.agentId !== undefined) {
+      const id = e.agentId
+      const step = stepOf(a)
+      if (step) note(async () => noteAgent($, id, { step, at: await $.clock.now() }))
+      return next(e)
+    }
     if (e.tool === 'Skill') {
       const goal = skillGoal(String(a.skill ?? ''), String(a.args ?? ''))
       if (goal) note(() => merge($, { goal, task: undefined }))
@@ -266,7 +286,10 @@ export const register: Register = (on, options) => {
     // The goal outlasts the turn: idle, the band shows it, and Haiku reads it to tell a follow-up from new work.
     if (e.agentId === undefined) note(() => merge($, { task: undefined, done: undefined, total: undefined, step: undefined }))
     else {
-      // A subagent finished: its status settles just after its answer.
+      // A subagent answered: what it found, for /catchup. Its status settles just after.
+      const id = e.agentId
+      const result = headline(e.answer)
+      if (activity && result) note(async () => noteAgent($, id, { result, step: undefined, at: await $.clock.now() }))
       $.ui.invalidate('ui.render')
       $.clock.after(1000, () => $.ui.invalidate('ui.render'))
     }
@@ -275,8 +298,10 @@ export const register: Register = (on, options) => {
       if (spec) {
         const h = await history($, held)
         const saved = h.saved
-        const entry: Saved = { at: await $.clock.now(), title: spec.title, mood: mood(spec).glyph, spec }
-        const stuck = entry.mood === '✓' ? stuckSince(saved) : undefined
+        await notes // the goal a prompt or skill named this turn is written by now
+        const goal = activity ? ((await $.state.get(NOW)).value?.goal ?? undefined) : undefined
+        const entry: Saved = { at: await $.clock.now(), title: spec.title, mood: mood(spec).glyph, spec, ...(goal ? { goal } : {}) }
+        const stuck = entry.mood === '✓' ? stuckSince(saved.filter(s => s.goal === goal)) : undefined
         if (stuck !== undefined) entry.stuck = entry.at - stuck
         h.saved = [...saved, entry].slice(-keep)
         await $.store.set(`h:${h.id}`, h.saved)
@@ -288,46 +313,120 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'catchup' }, async $ => {
     open = null
+    all = false
     await $.ui.open({ id: PANE, title: 'Catch-up' })
     return {}
   })
 
+  // The lay of the land for someone coming back: what waits on them, where each goal
+  // stands, what the agents and other sessions are doing; then one visual in full and
+  // the rest of the history, newest first.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const { id, saved } = await history($, held)
-    const seen = Number((await $.store.get(`p:${id}`)) ?? 0)
+    const { id, saved, seen } = await history($, held)
     const now = await $.clock.now()
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
-    if (saved.length === 0) return <Text dimColor>Nothing yet. Visuals the agent draws in this session collect here.</Text>
-    const recent = saved.slice(-6).reverse()
-    const fresh = recent.filter(s => s.at > seen).length
-    const shown = recent.some(s => s.at === open) ? open : recent[0].at
+    const crew = activity ? await agentRows($, now) : []
+    const others = await otherSessions($, id, now)
+    if (saved.length === 0 && crew.length === 0 && others.length === 0)
+      return <Text dimColor>Nothing yet. Visuals the agent draws in this session collect here.</Text>
+    const show = (at: number) => () => { open = at; $.ui.invalidate('ui.render') }
+    const fresh = saved.filter(s => s.at > seen).length
+    const asks = saved.filter(s => s.spec.ask && s.at > seen).reverse()
+    const goals = byGoal(saved)
+    const named = goals.some(g => g.goal !== undefined)
+    const lead = saved.length ? (waiting(saved, seen) ?? outcome(saved)) : undefined
+    const picked = saved.find(s => s.at === open) ?? lead
+    const rest = saved.filter(s => s !== picked).reverse()
+    const list = all ? rest : rest.slice(0, RECENT)
+    const room = (used: number) => Math.max(10, cols - used)
+    const glyph = (g: string) => <Text color={MOOD[g]} dimColor={!MOOD[g]}>{g} </Text>
+    const head = (t: string) => <Text bold>{t}</Text>
     return (
       <Box flexDirection="column">
         <Text>
           <Text bold>{fresh ? `${fresh} new` : 'Up to date'}</Text>
-          <Text dimColor>{` · ${saved.length} visual${saved.length === 1 ? '' : 's'} this session`}</Text>
+          <Text dimColor>{` · ${saved.length} visual${saved.length === 1 ? '' : 's'}${named ? ` · ${goals.length} goal${goals.length === 1 ? '' : 's'}` : ''}`}</Text>
         </Text>
-        <Text> </Text>
-        {recent.map(s =>
-          s.at === shown ? (
-            <Box key={String(s.at)} flexDirection="column" marginBottom={1}>
-              <Text dimColor>
-                {ago(now - s.at)}
-                {s.stuck !== undefined ? <Text color="success">{` · ${unblocked(s.stuck)}`}</Text> : ''}
-                {s.at > seen ? <Text color="claude"> · new</Text> : ''}
-              </Text>
-              {visual({ Box, Text }, draw(s.spec, cols))}
-            </Box>
-          ) : (
-            <Box key={String(s.at)}>
-              <Text color={MOOD[s.mood]} dimColor={!MOOD[s.mood]}>{s.mood} </Text>
-              <Button label={s.title} onPress={() => { open = s.at; $.ui.invalidate('ui.render') }} />
-              <Text dimColor>{`  ${ago(now - s.at)}`}</Text>
-              {s.stuck !== undefined ? <Text color="success" dimColor> · unblocked</Text> : ''}
-              {s.at > seen ? <Text color="claude"> ●</Text> : ''}
-            </Box>
-          ),
+        {asks.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            {head('Needs you')}
+            {asks.map(s => (
+              <Box key={`ask:${s.at}`}>
+                {glyph('?')}
+                <Button key={`ask:${s.at}`} label={cutWords(s.spec.soWhat ?? s.title, room(24))} onPress={show(s.at)} />
+                <Text dimColor wrap="truncate-end">{`  ${[s.goal, ago(now - s.at)].filter(Boolean).join(' · ')}`}</Text>
+              </Box>
+            ))}
+          </Box>
+        )}
+        {named && (
+          <Box flexDirection="column" marginTop={1}>
+            {head('Goals')}
+            {goals.slice(0, 6).map(g => {
+              const o = outcome(g.saved)
+              const n = g.saved.length
+              return (
+                <Box key={`goal:${g.goal ?? ''}`}>
+                  {glyph(o.mood)}
+                  <Button key={`goal:${g.goal ?? ''}`} label={cutWords(g.goal ?? 'Other', 32)} onPress={show(o.at)} />
+                  <Text dimColor wrap="truncate-end">{`  ${cutWords(o.title, room(52))} · ${n} visual${n === 1 ? '' : 's'} · ${ago(now - g.saved.at(-1)!.at)}`}</Text>
+                  {g.saved.some(s => s.at > seen) ? <Text color="claude"> ●</Text> : ''}
+                </Box>
+              )
+            })}
+          </Box>
+        )}
+        {crew.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            {head('Agents')}
+            {crew.map(a => (
+              <Box key={`agent:${a.id}`}>
+                {glyph(a.glyph)}
+                <Text>{cutWords(a.name, 24)}</Text>
+                <Text dimColor wrap="truncate-end">{`  ${[a.detail && cutWords(a.detail, room(40)), a.at !== undefined ? ago(now - a.at) : ''].filter(Boolean).join(' · ')}`}</Text>
+              </Box>
+            ))}
+          </Box>
+        )}
+        {others.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            {head('Other sessions')}
+            {others.map(o => (
+              <Box key={`session:${o.id}`}>
+                {glyph(o.glyph)}
+                <Text>{cutWords(o.dir, 24)}</Text>
+                <Text dimColor wrap="truncate-end">{`  ${cutWords(o.text, room(40))} · ${ago(now - o.at)}`}</Text>
+              </Box>
+            ))}
+          </Box>
+        )}
+        {picked && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text dimColor>
+              {[picked.goal, ago(now - picked.at)].filter(Boolean).join(' · ')}
+              {picked.stuck !== undefined ? <Text color="success">{` · ${unblocked(picked.stuck)}`}</Text> : ''}
+              {picked.at > seen ? <Text color="claude"> · new</Text> : ''}
+            </Text>
+            {visual({ Box, Text }, draw(picked.spec, cols))}
+          </Box>
+        )}
+        {rest.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            {head('Earlier')}
+            {list.map(s => (
+              <Box key={`v:${s.at}`}>
+                {glyph(s.spec.ask ? '?' : s.mood)}
+                <Button key={`v:${s.at}`} label={cutWords(s.title, room(16))} onPress={show(s.at)} />
+                <Text dimColor>{`  ${ago(now - s.at)}`}</Text>
+                {s.stuck !== undefined ? <Text color="success" dimColor> · unblocked</Text> : ''}
+                {s.at > seen ? <Text color="claude"> ●</Text> : ''}
+              </Box>
+            ))}
+            {rest.length > RECENT ? (
+              <Button key="more" label={all ? 'Show fewer' : `Show all ${rest.length}`} onPress={() => { all = !all; $.ui.invalidate('ui.render') }} />
+            ) : ''}
+          </Box>
         )}
       </Box>
     )
@@ -458,10 +557,84 @@ function landed(goal: string | undefined, title: string, meta: string, n: number
   return [...lead, { t: cutWords(title, room) }, ...m]
 }
 
-/** The visual the band leads with: the latest red one since the last green, else the latest. */
-function outcome(saved: Saved[]): Saved {
-  const k = saved.findLastIndex(s => s.mood === '✓')
-  return saved.slice(k + 1).findLast(s => s.mood === '✗') ?? saved.at(-1)!
+/** Where the latest goal stands: its latest status visual (flow, path, tree) when that is red, else the latest
+ *  visual. A blocker clears once a newer status visual of its goal is not red, or the work moves to another goal. */
+export function outcome(saved: Saved[]): Saved {
+  const last = saved.at(-1)!
+  const status = saved.findLast(s => s.goal === last.goal && STATUS_FORMS.has(s.spec.form))
+  return status?.mood === '✗' ? status : last
+}
+
+/** The latest question for you that came in after you last typed; answering it is typing. */
+export function waiting(saved: Saved[], seen: number): Saved | undefined {
+  return saved.findLast(s => s.spec.ask && s.at > seen)
+}
+
+/** History grouped by goal, the goal worked on most recently first. */
+export function byGoal(saved: Saved[]): Array<{ goal?: string; saved: Saved[] }> {
+  const groups = new Map<string | undefined, Saved[]>()
+  for (const s of saved) groups.set(s.goal, [...(groups.get(s.goal) ?? []), s])
+  return [...groups].map(([goal, saved]) => ({ goal, saved })).sort((a, b) => b.saved.at(-1)!.at - a.saved.at(-1)!.at)
+}
+
+/** Folds `patch` into one agent's note; keeps the 20 heard from last. Swallows its failures, as merge does. */
+async function noteAgent($: EngineInterface, id: string, patch: Partial<AgentNote> & { at: number }) {
+  try {
+    const cur = (await $.state.get(AGENTS)).value ?? {}
+    const all = Object.entries({ ...cur, [id]: { ...cur[id], ...patch } }).sort((a, b) => b[1].at - a[1].at)
+    await $.state.set(AGENTS, Object.fromEntries(all.slice(0, 20)))
+  } catch {}
+}
+
+/** An answer in a line: its visual's headline, else its first line of prose without markdown. */
+export function headline(answer: string): string | undefined {
+  const viz = split(answer).flatMap(p => ('viz' in p ? [p.viz] : [])).at(-1)
+  if (viz) return viz.title
+  const line = answer.split('\n').map(l => l.replace(/^[\s#>*\-]+|[*_`]+/g, '').trim()).find(Boolean)
+  return line ? cutWords(line, 100) : undefined
+}
+
+const AGENT_MOOD: Record<string, string> = { running: '◉', pending: '◉', waiting: '◉', idle: '◆', completed: '✓', failed: '✗', killed: '✗' }
+
+/** This session's agents for /catchup: still working first, each with what it is on or what it found. */
+async function agentRows($: EngineInterface, now: number) {
+  try {
+    const list = await $.agent.list()
+    const notes = (await $.state.get(AGENTS)).value ?? {}
+    const live = (s: string) => AGENT_MOOD[s] === '◉'
+    return list
+      .map(a => {
+        const n = notes[a.id] as AgentNote | undefined
+        const detail = live(a.status) ? (n?.step ?? a.description) : (n?.result ?? n?.step ?? a.description)
+        return { id: a.id, glyph: AGENT_MOOD[a.status] ?? '◆', name: a.name || a.description || a.type, detail, at: n?.at, live: live(a.status) }
+      })
+      .sort((a, b) => Number(b.live) - Number(a.live) || (b.at ?? 0) - (a.at ?? 0))
+      .slice(0, 6)
+  } catch {
+    return []
+  }
+}
+
+/** Other sessions with a visual in the last day, from the history every session keeps in the store; those waiting on you first. */
+async function otherSessions($: EngineInterface, id: string, now: number) {
+  try {
+    const out: Array<{ id: string; dir: string; glyph: string; text: string; at: number; ask: boolean }> = []
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith('h:') || key === `h:${id}`) continue
+      const sid = key.slice(2)
+      const saved = ((await $.store.get(key)) as Saved[] | undefined) ?? []
+      const last = saved.at(-1)
+      if (!last || now - last.at > DAY) continue
+      const ask = waiting(saved, Number((await $.store.get(`p:${sid}`)) ?? 0))
+      const lead = ask ?? outcome(saved)
+      const dir = String((await $.store.get(`d:${sid}`)) ?? sid.slice(0, 8))
+      const text = ask ? `Needs you: ${ask.spec.soWhat}` : [lead.goal, lead.title].filter(Boolean).join(' → ')
+      out.push({ id: sid, dir, glyph: ask ? '?' : lead.mood, text, at: last.at, ask: !!ask })
+    }
+    return out.sort((a, b) => Number(b.ask) - Number(a.ask) || b.at - a.at).slice(0, 5)
+  } catch {
+    return []
+  }
 }
 
 /** Subagents and teammates still at work; 0 where the list can't be read. */
