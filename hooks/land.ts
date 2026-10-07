@@ -2,7 +2,7 @@
 // the compaction checkpoint, agent lanes, the thrash alarm and the collision radar.
 // Pure, like render.ts: the band, /catchup and the tests share it. No model tokens.
 
-import { cut, cutWords, w } from './render'
+import { cut, cutWords, MIN_WIDTH, w } from './render'
 import type { Line, Seg, Spec, Tone } from './render'
 
 /** One main-loop turn: when it ended, how many tool calls it took (its agents' included), how long, and the visual it drew. */
@@ -135,7 +135,7 @@ export function noticeText(c: Omit<Checkpoint, 'notice'>): string {
 
 /** The checkpoint as a framed card, like a visual: what the summary was asked to keep, and the size before and after. */
 export function checkpointCard(c: Checkpoint, columns = 80): Line[] {
-  const width = Math.max(40, Math.min(72, columns))
+  const width = Math.max(MIN_WIDTH, Math.min(72, columns))
   const room = width - 3
   const rail: Tone = 'data'
   const n = total(c.kept)
@@ -168,8 +168,9 @@ const LANE_TONE: Record<string, Tone> = { '✓': 'ok', '✗': 'bad', '◉': 'war
  */
 export function lanes(rows: Lane[], room: number, now: number): Line[] {
   if (rows.length === 0) return []
-  const nw = Math.min(16, Math.max(...rows.map(r => w(r.name))))
-  const track = Math.max(10, Math.min(32, room - nw - 2 - 2 - 24))
+  // Narrow, the names give way first (to a third of the room), then the track (to 8 cells), then what each found.
+  const nw = Math.min(16, Math.max(6, Math.floor(room / 3)), Math.max(...rows.map(r => w(r.name))))
+  const track = Math.max(8, Math.min(10, room - nw - 2 - 2 - 8), Math.min(32, room - nw - 2 - 2 - 24))
   const starts = rows.flatMap(r => (r.start !== undefined ? [r.start] : []))
   const t0 = starts.length ? Math.min(...starts) : now
   const total = Math.max(60_000, now - t0)
@@ -188,7 +189,7 @@ export function lanes(rows: Lane[], room: number, now: number): Line[] {
       const e = Math.max(s, r.live ? track - 1 : col(r.end ?? r.start))
       segs.push({ t: ' '.repeat(s) }, { t: '━'.repeat(e - s), tone: r.live ? 'warn' : tone }, { t: r.glyph, tone }, { t: ' '.repeat(track - 1 - e) })
     }
-    if (r.detail) segs.push({ t: '  ' }, { t: cutWords(r.detail, Math.max(8, room - nw - 2 - track - 2)), tone: r.glyph === '✗' ? 'bad' : 'dim' })
+    if (r.detail && room - nw - 2 - track - 2 >= 6) segs.push({ t: '  ' }, { t: cutWords(r.detail, room - nw - 2 - track - 2), tone: r.glyph === '✗' ? 'bad' : 'dim' })
     out.push(joined(segs.filter(s => s.t)))
   }
   return out

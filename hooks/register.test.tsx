@@ -3,7 +3,8 @@ import { expect, test } from 'claude-code/testing'
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
 import { flockCells, flockWidth, MAX_PUPS, pupOf } from './boo-flock'
 import { small, smallCells } from './boo-small'
-import { change, changes, coverage, cutWords, draw, mood, parse, plain, split, w } from './render'
+import { change, changes, coverage, cutWords, draw, MIN_WIDTH, mood, parse, plain, split, w } from './render'
+import { svg } from './svg'
 import { card, checkpointCard, clashText, collisions, crowded, keepInstructions, lanes, noticeText, place, spinning } from './land'
 import type { Checkpoint } from './land'
 import { byGoal, goalOf, goalReply, headline, inTranscript, keepOf, outcome, sinceSeen, skillGoal, stepOf, waiting } from './register'
@@ -30,9 +31,9 @@ test('every form parses and fits its width', async () => {
   for (const src of EXAMPLES) {
     const spec = parse(src)
     expect(spec).not.toBe(null)
-    for (const cols of [44, 80]) {
+    for (const cols of [MIN_WIDTH, 30, 34, 44, 80]) {
       const text = plain(draw(spec!, cols))
-      for (const line of text.split('\n')) expect(w(line) <= Math.max(44, Math.min(72, cols))).toBe(true)
+      for (const line of text.split('\n')) expect(w(line) <= Math.min(72, cols)).toBe(true)
     }
   }
   expect(plain(draw(parse(FLOW)!))).toContain('✓ ━━━')
@@ -41,7 +42,7 @@ test('every form parses and fits its width', async () => {
 test('awkward input still draws every value', async () => {
   const fits = (src: string, cols: number) => {
     const text = plain(draw(parse(src)!, cols))
-    for (const line of text.split('\n')) expect(w(line) <= Math.max(40, Math.min(72, cols))).toBe(true)
+    for (const line of text.split('\n')) expect(w(line) <= Math.max(MIN_WIDTH, Math.min(72, cols))).toBe(true)
     return text
   }
   // Negative bars draw an empty track instead of throwing.
@@ -1304,4 +1305,45 @@ test('no agents, no flock', async ($, on) => {
   const ui = await band($, on)
   expect(await ui.find({ type: 'Raster', key: 'flock' })).toBe(undefined)
   expect(await ui.find({ type: 'Raster', key: 'boo' })).not.toBe(undefined)
+})
+
+test('emoji drawn as pictures take two cells', async () => {
+  expect(w('✅ done')).toBe(7)
+  expect(w('⚡')).toBe(2)
+  expect(w('✓ done')).toBe(6)
+})
+
+test('a narrow matrix keeps its labels by closing the gaps between columns', async () => {
+  const text = plain(draw(parse(EXAMPLES[6])!, MIN_WIDTH))
+  expect(text).toContain('postgr')
+  for (const line of text.split('\n')) expect(w(line) <= MIN_WIDTH).toBe(true)
+})
+
+test('on mobile each run is pinned to its column and box lines are strokes', async () => {
+  const out = svg([[{ t: '│', tone: 'bad' }, { t: '  ' }, { t: '✓', tone: 'ok' }, { t: ' a<b ━━' }]], 40)
+  // `✓` sits in cell 3 and fills one cell, whatever width the font draws it at.
+  expect(out).toContain(`<text x="${3 * 7.8}" y=`)
+  expect(out).toMatch(/textLength="7.8" lengthAdjust="spacingAndGlyphs" class="ok">✓</)
+  expect(out).toContain('>a&lt;b</text>')
+  expect(out).not.toMatch(/>[│━]/)
+  expect(out).toMatch(/<path d="M[^"]+V[^"]+" class="bad"/)
+  expect(out).toMatch(/stroke-width:2.4/)
+  // At least `cols` cells wide, so visuals in a column share one width.
+  expect(out).toMatch(/width="(\d+(\.\d)?)"/)
+  expect(Number(/width="([\d.]+)"/.exec(out)![1])).toBeGreaterThanOrEqual(40 * 7.8)
+})
+
+test('a viz fence is drawn as an SVG on mobile and as text elsewhere', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{(e.props as { text?: string }).text ?? ''}</Text>
+  })
+  const props = { text: '```viz\n' + FLOW + '\n```\nDetails follow here.', isFirstOfReply: true }
+  const phone = await $.ui.mount({ plugin: 'visual-companions', surface: 'mobile', component: 'AssistantMessage', props })
+  const pic = await phone.find({ type: 'Svg' })
+  expect(pic).not.toBe(undefined)
+  expect(String((pic as any).props?.alt ?? (pic as any).alt ?? '')).toContain('Release is blocked')
+  expect(await phone.find({ type: 'Text', text: /Details follow here/ })).not.toBe(undefined)
+  const desk = await $.ui.mount({ plugin: 'visual-companions', surface: 'desktop', component: 'AssistantMessage', props })
+  expect(await desk.find({ type: 'Svg' })).toBe(undefined)
 })

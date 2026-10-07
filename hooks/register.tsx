@@ -7,7 +7,8 @@ import type { Pup } from './boo-flock'
 import { small } from './boo-small'
 import { card, checkpointCard, clashText, CLASH_WINDOW, collisions, commandKey, crowded, cutsOf, keepInstructions, lanes, noticeText, span, spinning, tokens, turnsOf } from './land'
 import type { Checkpoint, Edits, Kept, Lane, Peer, Turn } from './land'
-import { cut, cutWords, draw, mood, split, w } from './render'
+import { cut, cutWords, draw, mood, plain, split, w } from './render'
+import { svg } from './svg'
 import type { Line, Living, Spec, Tone } from './render'
 import type { AgentNote, Now } from './contract'
 
@@ -379,7 +380,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
-          {specs.map((s, k) => visual($.ui.resolve(e), draw(s, cols, inTranscript(hist, s)), k))}
+          {specs.map((s, k) => visual($.ui.resolve(e), draw(s, cols, inTranscript(hist, s)), k, e.surface === 'mobile' ? { cols } : undefined))}
         </Box>
         {rest}
       </Box>
@@ -466,10 +467,12 @@ export const register: Register = (on, options) => {
   // stands, what the agents and other sessions are doing; then one visual in full and
   // the rest of the history, newest first.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const el = $.ui.resolve(e)
+    const { Box, Text, Button } = el
     const { id, saved, seen, cuts } = await history($, held)
     const now = await $.clock.now()
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
+    const onPhone = e.surface === 'mobile' ? { cols } : undefined
     const crew = activity ? await agentRows($, now) : []
     const others = await otherSessions($, id, now)
     if (saved.length === 0 && crew.length === 0 && others.length === 0 && cuts.length === 0)
@@ -528,7 +531,7 @@ export const register: Register = (on, options) => {
         {crew.length > 0 && crew.some(a => a.start !== undefined) && (
           <Box flexDirection="column" marginTop={1}>
             {head('Agents')}
-            {visual({ Box, Text }, lanes(crew, cols, now))}
+            {visual(el, lanes(crew, cols, now), undefined, onPhone)}
           </Box>
         )}
         {crew.length > 0 && !crew.some(a => a.start !== undefined) && (
@@ -558,7 +561,7 @@ export const register: Register = (on, options) => {
         {pickedCut && (
           <Box flexDirection="column" marginTop={1}>
             <Text dimColor>{ago(now - pickedCut.at)}</Text>
-            {visual({ Box, Text }, checkpointCard(pickedCut, cols))}
+            {visual(el, checkpointCard(pickedCut, cols), undefined, onPhone)}
           </Box>
         )}
         {picked && (
@@ -568,7 +571,7 @@ export const register: Register = (on, options) => {
               {picked.stuck !== undefined ? <Text color="success">{` · ${unblocked(picked.stuck)}`}</Text> : ''}
               {picked.at > seen ? <Text color="claude"> · new</Text> : ''}
             </Text>
-            {visual({ Box, Text }, draw(picked.spec, cols, sinceSeen(saved, picked, seen)))}
+            {visual(el, draw(picked.spec, cols, sinceSeen(saved, picked, seen)), undefined, onPhone)}
           </Box>
         )}
         {rest.length > 0 && (
@@ -599,7 +602,9 @@ export const register: Register = (on, options) => {
   })
 }
 
-function visual({ Box, Text }: { Box: any; Text: any }, lines: Line[], key?: number) {
+/** Drawn lines as Text rows; on mobile as an SVG, since the app's font draws some glyphs off the cell grid. */
+function visual({ Box, Text, Svg }: { Box: any; Text: any; Svg?: any }, lines: Line[], key?: number, mobile?: { cols: number }) {
+  if (mobile && Svg) return <Svg key={key === undefined ? undefined : String(key)} source={svg(lines, Math.min(72, mobile.cols))} alt={plain(lines)} />
   return (
     <Box key={key === undefined ? undefined : String(key)} flexDirection="column">
       {lines.map((l, n) => (
