@@ -32,12 +32,14 @@ The first line names the form and states the headline as a claim. A line startin
 | Form | Use it for | Rows |
 | --- | --- | --- |
 | `flow` | progress through steps | `+ build`, `x migrate \| note` |
+| `path` | where in a system something happens | components in order, same marks as `flow` |
 | `tree` | causes or a plan | items indented 2 spaces per level |
 | `delta` | what changed | `recall: 0.91 -> 0.95 +` |
 | `bars` | comparison | `new model: 89 *`, options `@ unit=%; max=100; bar=85` |
 | `tradeoff` | a choice on two axes | `self-host: 0.5 0.7 *`, options `@ x=effort saved; y=fidelity` |
+| `matrix` | options against several criteria | `postgres: + + ~ *`, options `@ cols=cost, scale, setup` |
 
-In `flow` and `tree`, item marks are `+` done, `*` active, `x` blocked, `.` todo, `-` dropped. Keep flow step labels to about 14 characters so the steps fit on one track. Add `| note` to any row to attach a note.
+In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked, `.` todo, `-` dropped. Keep flow step labels to about 14 characters so the steps fit on one track. Add `| note` to any row to attach a note.
 
 ```
 ╭─ New ranking model trades latency for recall

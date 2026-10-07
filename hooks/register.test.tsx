@@ -18,6 +18,8 @@ const EXAMPLES = [
   `delta New ranking model trades latency for recall\nrecall: 0.91 -> 0.95 +\np50 latency: 180ms -> 420ms -\ncost / 1k: $0.40 -> $0.40`,
   `bars New model barely beats a length heuristic\n@ unit=%; max=100; bar=85\nnew model: 89 *\nlength heuristic: 82\nrandom: 50`,
   `tradeoff Self-hosting is the middle path\n@ x=effort saved; y=fidelity\nfork upstream: 0.85 0.35\nself-host: 0.5 0.7 *\nbuild in-house: 0.05 0.95`,
+  `path Checkout requests die in the token refresh\nweb app\napi gateway\nx auth service | refresh token rejected: clock skew 4m\n. orders db`,
+  `matrix Postgres wins on everything but setup\n@ cols=cost, scale, ops, setup time\npostgres: + + + ~ *\ndynamo: ~ + + + | vendor lock-in\nsqlite: + x + +`,
 ]
 
 test('every form parses and fits its width', async () => {
@@ -100,6 +102,34 @@ test('rows are read the way an agent writes them, and none are lost', async () =
   // A chart with nothing to plot stays the code block it was written as.
   expect(parse('bars Nothing\nA: soon\nB: later')).toBe(null)
   expect(parse('delta Nothing\nlogs: now structured')).toBe(null)
+})
+
+test('path draws components as boxes, and runs on to a new row when narrow', async () => {
+  const src = 'path Checkout dies in the token refresh\nweb app\napi gateway\nx auth service | refresh token rejected\n. orders db'
+  const wide = plain(draw(parse(src)!, 80))
+  expect(wide).toContain('│ web app │──▶│ api gateway │')
+  // The hop out of a blocked component is broken, and its mark sits in the box's border.
+  expect(wide).toContain('│ auth service │┄┄▶│ orders db │')
+  expect(wide).toMatch(/└─+✗─+┘/)
+  expect(wide).toContain('↑ refresh token rejected')
+  const narrow = plain(draw(parse(src)!, 44))
+  expect(narrow).toContain('─╮')
+  expect(narrow).toContain('╰▶│')
+  expect(mood(parse(src)!).glyph).toBe('✗')
+  // Unmarked components draw without a mark; a lone component is still a path.
+  expect(plain(draw(parse('path One\napi')!))).not.toMatch(/[✓✗○◉⊘•]/)
+})
+
+test('matrix lines cells up under their criteria and stars the choice', async () => {
+  const m = plain(draw(parse('matrix Pick\n@ cols=cost, scale\npostgres: + ~ *\nsqlite: + x\nduck: 3 1.2k')!, 80)).split('\n')
+  const at = (row: string, s: string) => m.find(l => l.includes(row))!.indexOf(s)
+  expect(m.find(l => l.includes('postgres'))).toContain('★ postgres')
+  expect(at('postgres', '~')).toBe(at('sqlite', '✗'))
+  expect(at('postgres', '✓')).toBe(at('sqlite', '✓'))
+  // Values that aren't marks draw as written.
+  expect(m.find(l => l.includes('duck'))).toContain('1.2k')
+  // A matrix with no row to draw stays a code block.
+  expect(parse('matrix Nothing\n@ cols=a\njust prose')).toBe(null)
 })
 
 test('a viz fence still streaming draws as it grows', async () => {

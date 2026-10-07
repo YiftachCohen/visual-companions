@@ -17,7 +17,7 @@ export type Status = 'done' | 'active' | 'blocked' | 'todo' | 'dropped' | null
 type Item = { status: Status; label: string; note?: string; depth: number }
 export type Spec = { form: string; title: string; soWhat?: string; opts: Record<string, string>; items: Item[] }
 
-export const FORMS = ['flow', 'tree', 'delta', 'bars', 'tradeoff']
+export const FORMS = ['flow', 'path', 'tree', 'delta', 'bars', 'tradeoff', 'matrix']
 const STATUS: Record<string, Status> = { '+': 'done', '*': 'active', x: 'blocked', '.': 'todo', '-': 'dropped' }
 const MARK: Record<string, string> = { done: '✓', active: '◉', blocked: '✗', todo: '○', dropped: '⊘', null: '•' }
 const TONE: Record<string, Tone | undefined> = { done: 'ok', active: 'warn', blocked: 'bad', todo: 'dim', dropped: 'dim' }
@@ -45,7 +45,7 @@ export function parse(src: string): Spec | null {
     let status: Status = null
     let body = l
     // Marks are a flow/tree thing: elsewhere `x axis: 3` is a label, not a blocked item.
-    const m = form === 'flow' || form === 'tree' ? /^([+*x.\-])\s+(.*)$/.exec(l) : null
+    const m = form === 'flow' || form === 'path' || form === 'tree' ? /^([+*x.\-])\s+(.*)$/.exec(l) : null
     if (m) { status = STATUS[m[1]]; body = m[2] }
     const [label, ...note] = body.split(' | ')
     spec.items.push({ status, label: label.trim(), note: note.join(' | ').trim() || undefined, depth })
@@ -85,7 +85,14 @@ const pointRow = (l: string) => {
   const m = /^(.*):\s*(-?[\d.]+)[\s,]+(-?[\d.]+)\s*(\*)?$/.exec(l)
   return m && isFinite(Number(m[2])) && isFinite(Number(m[3])) ? { label: m[1], x: Number(m[2]), y: Number(m[3]), chosen: !!m[4] } : null
 }
-const ROW: Record<string, ((l: string) => unknown) | undefined> = { delta: deltaRow, bars: barRow, tradeoff: pointRow }
+const matrixRow = (l: string) => {
+  const m = /^(.*):\s*(.+?)$/.exec(l)
+  const cells = m ? m[2].split(/\s+/) : []
+  const chosen = cells.at(-1) === '*'
+  if (chosen) cells.pop()
+  return m && cells.length ? { label: m[1], cells, chosen } : null
+}
+const ROW: Record<string, ((l: string) => unknown) | undefined> = { delta: deltaRow, bars: barRow, tradeoff: pointRow, matrix: matrixRow }
 
 /** Splits markdown into prose and parsed ```viz fences; unparseable fences stay prose.
  *  Fences are tracked line by line, so a ```viz example quoted inside a longer fence stays prose.
@@ -334,6 +341,91 @@ function bars(s: Spec, room: number): Line[] {
   return out
 }
 
+// A component's box: its status mark sits in the bottom border.
+const BORDER: Record<string, Tone | undefined> = { blocked: 'bad', active: 'warn' }
+const BROKEN = new Set<Status>(['blocked', 'todo', 'dropped'])
+
+function path(s: Spec, room: number): Line[] {
+  const it = s.items.map(i => ({ ...i, label: cut(i.label, room - 10) }))
+  const bw = (n: number) => w(it[n].label) + 4
+  // Boxes in rows that fit; a row that runs on ends in ─╮ and the next starts with ╰▶.
+  const rows: number[][] = [[]]
+  let x = 0
+  it.forEach((_, n) => {
+    const lead = rows.length > 1 && rows[rows.length - 1].length === 0 ? 2 : 0
+    const need = lead + bw(n) + (n < it.length - 1 ? 3 : 0)
+    if (rows[rows.length - 1].length && x + need > room) { rows.push([]); x = 2 }
+    else x += lead
+    rows[rows.length - 1].push(n)
+    x += bw(n) + 3
+  })
+  const out: Line[] = []
+  const col: number[] = [] // where each box starts, for its note
+  rows.forEach((row, r) => {
+    const top: Line = [], mid: Line = [], bot: Line = []
+    if (r > 0) { top.push(sp(2)); mid.push({ t: '╰▶', tone: 'dim' }); bot.push(sp(2)) }
+    row.forEach((n, k) => {
+      const i = it[n], tone = BORDER[String(i.status)] ?? 'dim', inner = bw(n) - 2
+      col[n] = lineW(top)
+      const m = i.status ? MARK[i.status] : ''
+      const left = Math.floor((inner - w(m)) / 2)
+      top.push({ t: '┌' + '─'.repeat(inner) + '┐', tone })
+      mid.push({ t: '│ ', tone }, { t: i.label, tone: TONE[String(i.status)] === 'dim' ? 'dim' : BORDER[String(i.status)] ?? 'title' }, { t: ' │', tone })
+      bot.push({ t: '└' + '─'.repeat(left), tone }, ...(m ? [mark(i.status)] : []), { t: '─'.repeat(inner - left - w(m)) + '┘', tone })
+      if (n === it.length - 1) return
+      const broken = BROKEN.has(i.status)
+      const last = k === row.length - 1
+      top.push(sp(last ? 2 : 3)); bot.push(sp(last ? 2 : 3))
+      mid.push({ t: last ? (broken ? '┄╮' : '─╮') : broken ? '┄┄▶' : '──▶', tone: broken ? 'dim' : undefined })
+    })
+    out.push(top, mid, bot)
+  })
+  // Notes under their box, or `label · note` from the left when they won't fit there.
+  for (const [n, i] of it.entries()) {
+    if (!i.note) continue
+    const tone = i.status === 'blocked' ? undefined : 'dim'
+    const under = wrap(i.note, room - col[n] - 2)
+    if (room - col[n] - 2 >= 16 && under.length <= 2) under.forEach((l, k) => out.push([sp(col[n]), { t: k ? '  ' : '↑ ', tone: 'dim' }, { t: l, tone }]))
+    else out.push([{ t: i.label + ' · ', tone: 'dim' }, { t: cut(i.note, room - w(i.label) - 3), tone }])
+  }
+  return out
+}
+
+// Matrix cells: + good, ~ partial, x bad, - none, ? unknown; anything else (a number, a word) draws as written.
+const CELL: Record<string, Seg> = { '+': { t: '✓', tone: 'ok' }, '~': { t: '~', tone: 'warn' }, x: { t: '✗', tone: 'bad' }, '-': { t: '–', tone: 'dim' }, '?': { t: '?', tone: 'dim' } }
+
+function matrix(s: Spec, room: number): Line[] {
+  const all = s.items.map(i => ({ i, r: matrixRow(i.label) }))
+  const rows = all.flatMap(({ r }) => (r ? [r] : []))
+  const n = Math.max(...rows.map(r => r.cells.length))
+  const heads = (s.opts.cols ?? '').split(',').map(h => h.trim())
+  const cellW = (c: string) => w(CELL[c]?.t ?? c)
+  let hw = [...Array(n)].map((_, k) => Math.max(w(heads[k] ?? ''), ...rows.map(r => cellW(r.cells[k] ?? ''))))
+  let lw = Math.max(...rows.map(r => w(r.label)))
+  const total = () => 2 + lw + hw.reduce((a, b) => a + b + 2, 0)
+  // Too wide: shorten headers to 5 cells, then labels.
+  if (total() > room) hw = hw.map((h, k) => Math.max(Math.min(h, 5), ...rows.map(r => cellW(r.cells[k] ?? ''))))
+  if (total() > room) lw = Math.max(4, lw - (total() - room))
+  const center = (seg: Seg, width: number): Line => {
+    const t = cut(seg.t, width), l = Math.floor((width - w(t)) / 2)
+    return [sp(2 + l), { ...seg, t }, sp(width - w(t) - l)]
+  }
+  const out: Line[] = []
+  if (heads.some(Boolean)) out.push([sp(2 + lw), ...hw.flatMap((h, k) => center({ t: heads[k] ?? '', tone: 'dim' }, h))])
+  for (const { i, r } of all) {
+    if (!r) { out.push(...loose(i.label, i.note, room)); continue }
+    const label = cut(r.label, lw)
+    const row: Line = [
+      r.chosen ? { t: '★ ', tone: 'pick' } : sp(2),
+      { t: label, tone: r.chosen ? 'title' : undefined }, sp(lw - w(label)),
+      ...hw.flatMap((h, k) => center(CELL[r.cells[k] ?? ''] ?? { t: r.cells[k] ?? '' }, h)),
+    ]
+    while (row.length && /^ *$/.test(row[row.length - 1].t)) row.pop()
+    out.push(...noted(row, i.note, room))
+  }
+  return out
+}
+
 function tradeoff(s: Spec, room: number): Line[] {
   const W = Math.min(46, room - 4), H = 9
   const ch: string[][] = [], tn: (Tone | undefined)[][] = []
@@ -411,6 +503,8 @@ export function draw(spec: Spec, columns = 80): Line[] {
     : spec.form === 'tree' ? tree(spec, room)
     : spec.form === 'delta' ? delta(spec, room)
     : spec.form === 'bars' ? bars(spec, room)
+    : spec.form === 'path' ? path(spec, room)
+    : spec.form === 'matrix' ? matrix(spec, room)
     : tradeoff(spec, room)
   const rail = mood(spec).tone
   const done = spec.items.filter(i => i.status === 'done').length
