@@ -16,6 +16,46 @@
     "ui"
   ],
   "userConfig": {
+    "visuals": {
+      "type": "boolean",
+      "title": "Visuals",
+      "description": "Ask the agent for viz blocks. Off removes the ~200-token guide from the system prompt, so no new visuals are drawn.",
+      "default": true
+    },
+    "band": {
+      "type": "boolean",
+      "title": "Headline band",
+      "description": "Show the latest visual's headline (and Boo) above the prompt.",
+      "default": true
+    },
+    "activity": {
+      "type": "boolean",
+      "title": "Activity line",
+      "description": "While the agent works, show its goal, task and current step in the band. Off also skips the small Haiku call that names a plain prompt's goal.",
+      "default": true
+    },
+    "history": {
+      "type": "string",
+      "title": "History size",
+      "description": "How many visuals /catchup keeps per session.",
+      "default": "20",
+      "options": [
+        "10",
+        "20",
+        "50"
+      ]
+    },
+    "retention": {
+      "type": "string",
+      "title": "History retention (days)",
+      "description": "Other sessions' visual history is deleted after this many days.",
+      "default": "30",
+      "options": [
+        "7",
+        "30",
+        "90"
+      ]
+    },
     "companion": {
       "type": "string",
       "title": "Companion",
@@ -25,6 +65,39 @@
         "small",
         "big",
         "off"
+      ]
+    },
+    "booAnimation": {
+      "type": "string",
+      "title": "Boo animation",
+      "description": "animated, or still: one resting pose per mood, with no timer.",
+      "default": "animated",
+      "options": [
+        "animated",
+        "still"
+      ]
+    },
+    "booReactions": {
+      "type": "boolean",
+      "title": "Boo reactions",
+      "description": "Play the one-shot reactions: the cheer on green, the fade on red, the relief hop. Off goes straight to the resting loop.",
+      "default": true
+    },
+    "booEffects": {
+      "type": "boolean",
+      "title": "Boo effects",
+      "description": "Small Boo's particles and glow: sparkles, rain, the working trail.",
+      "default": true
+    },
+    "booColor": {
+      "type": "string",
+      "title": "Boo colour",
+      "description": "mood (a colour per outcome), mono (one neutral colour), or claude (Claude orange).",
+      "default": "mood",
+      "options": [
+        "mood",
+        "mono",
+        "claude"
       ]
     }
   },

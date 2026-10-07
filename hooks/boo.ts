@@ -66,8 +66,17 @@ export const COLOR: Record<BooMood, number> = {
   relieved: 0x9ece6a,
 }
 
-// Frames that keep another mood's colour whatever mood plays them.
-const TINT: Record<string, number> = { stuck: COLOR.blocked, stuckBlink: COLOR.blocked }
+// Frames drawn in the blocked colour whatever mood plays them.
+const TINT = new Set(['stuck', 'stuckBlink'])
+
+/** How Boo is painted, from the plugin's options: its palette, and whether small Boo's particles and glow show. */
+export type Look = { palette: 'mood' | 'mono' | 'claude'; effects: boolean }
+export const LOOK: Look = { palette: 'mood', effects: true }
+const CLAUDE = 0xd97757
+
+/** A mood's colour under `look`: its own, one `neutral` for all, or Claude's orange. */
+export const hue = (m: BooMood, look: Look, neutral = COLOR.neutral) =>
+  look.palette === 'mood' ? COLOR[m] : look.palette === 'mono' ? neutral : CLAUDE
 
 /** Boo's mood for a stored visual, read off the same state as its glyph. */
 export function booMood(spec: Spec): BooMood {
@@ -103,9 +112,9 @@ const UPPER = 0x2580 // ▀
 const LOWER = 0x2584 // ▄
 
 /** A frame as Raster cells: base64 of [codePoint, fg, bg] per cell, row-major. */
-export function cells(frame: string, color: number): string {
+export function cells(frame: string, color: number, blocked = COLOR.blocked): string {
   const fade = FADE[frame] ?? 0
-  const body = mix(TINT[frame] ?? color, 0x808080, fade)
+  const body = mix(TINT.has(frame) ? blocked : color, 0x808080, fade)
   const paint: Record<string, number> = {
     b: body,
     s: mix(body, 0x000000, 0.38),
@@ -131,10 +140,16 @@ export function pack(triplets: number[][]): string {
   return base64(new Uint8Array(Uint32Array.from(triplets.flat()).buffer))
 }
 
-/** A companion the band can draw: its size, and its cells `t` ms into a mood. */
-export type Companion = { columns: number; rows: number; draw: (m: BooMood, t: number) => string }
+/** A companion the band can draw: its size, its cells `t` ms into a mood, and
+ *  `settle(m)`, the ms its one-shot reaction to `m` lasts (0 for none). */
+export type Companion = { columns: number; rows: number; settle: (m: BooMood) => number; draw: (m: BooMood, t: number, look?: Look) => string }
 
-export const big: Companion = { columns: COLUMNS, rows: ROWS, draw: (m, t) => cells(frameAt(m, t).frame, COLOR[m]) }
+export const big: Companion = {
+  columns: COLUMNS,
+  rows: ROWS,
+  settle: m => (MOODS[m].intro ?? []).reduce((n, [, ms]) => n + ms, 0),
+  draw: (m, t, look = LOOK) => cells(frameAt(m, t).frame, hue(m, look), hue('blocked', look)),
+}
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 

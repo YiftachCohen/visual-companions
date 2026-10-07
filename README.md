@@ -2,7 +2,7 @@
 
 A Claude Code plugin that adds a small visual to replies that report a result, a blocker or a decision.
 
-The agent opens such a reply with a short ` ```viz ` block. The plugin draws that block as a framed terminal visual above the prose. The latest headline stays on a line above the prompt, and `/catchup` lists the visuals from this session.
+The agent opens such a reply with a short ` ```viz ` block. The plugin draws that block as a framed terminal visual above the prose. A line above the prompt shows what the work is for and where it landed, so you can see the state of a session at a glance when you switch back to it. `/catchup` lists the visuals from this session.
 
 ```
 ╭─ Release is blocked at the migrate step  2/4
@@ -50,6 +50,33 @@ In `flow` and `tree`, item marks are `+` done, `*` active, `x` blocked, `.` todo
 ```
 
 A fence whose first word is not a known form is left as a normal code block.
+
+## Configuration
+
+Every setting is a row in `/config`, and you can also set them when you install the plugin. A change takes effect right away. Values are stored in your settings under `pluginConfigs["visual-companions"]`.
+
+| Setting | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `visuals` | on / off | on | Off removes the guide from the system prompt, so the agent stops writing visuals and the plugin uses no model tokens. |
+| `band` | on / off | on | The line above the prompt, with Boo: the goal and the latest headline, or an earlier ✗ when no ✓ has followed it, plus its age, how many visuals came in since you last typed, and how many agents are still running. |
+| `activity` | on / off | on | The band shows the goal; while the agent works, also its task and progress (`2/5`). The current tool step appears only when there's room (big Boo) or nothing else to show. Off also skips the small Haiku call that names a plain prompt's goal. |
+| `history` | 10 / 20 / 50 | 20 | How many visuals `/catchup` keeps per session. |
+| `retention` | 7 / 30 / 90 | 30 | Days before other sessions' visual history is deleted. |
+| `companion` | small / big / off | small | Boo's size: one row of braille, two rows of pixels, or a glyph only. |
+| `booAnimation` | animated / still | animated | Still shows one resting pose per mood and runs no timer. |
+| `booReactions` | on / off | on | The one-shot reactions: a cheer on green, a fade on red, a hop when a blocked task turns green. Off goes straight to the resting loop. |
+| `booEffects` | on / off | on | Small Boo's particles and glow. |
+| `booColor` | mood / mono / claude | mood | A colour per outcome, one neutral colour, or Claude orange. |
+
+Example `~/.claude/settings.json` entry:
+
+```json
+{
+  "pluginConfigs": {
+    "visual-companions": { "companion": "big", "booAnimation": "still", "history": "50" }
+  }
+}
+```
 
 ## Development
 

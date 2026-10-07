@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 import { big, booMood } from './boo'
-import type { Companion } from './boo'
+import type { Companion, Look } from './boo'
 import { small } from './boo-small'
 import { cut, cutWords, draw, mood, split, w } from './render'
 import type { Line, Spec, Tone } from './render'
@@ -17,8 +17,7 @@ delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 8
 "> one line" ends it: why it matters or what's next.`
 
 const PANE = 'catchup'
-const KEEP = 20
-const STALE = 30 * 86_400_000 // other sessions' history is dropped after 30 days
+const DAY = 86_400_000
 
 const NOW = { plugin: 'visual-companions', key: 'now' } as const
 
@@ -31,22 +30,38 @@ const COLOR: Partial<Record<Tone, string>> = { ok: 'success', bad: 'error', warn
 const COMPANIONS: Record<string, Companion | undefined> = { small, big }
 
 export const register: Register = (on, options) => {
+  // Every option is a row in /config (plugin.json's userConfig); a change there reloads this module.
   const companion = COMPANIONS[String(options.companion ?? 'small')] // undefined: off, the glyph line
+  const look: Look = { palette: pick(options.booColor, ['mood', 'mono', 'claude'], 'mood'), effects: options.booEffects !== false }
+  const animate = options.booAnimation !== 'still'
+  const reactions = options.booReactions !== false
+  const guide = options.visuals !== false
+  const showBand = options.band !== false
+  const activity = options.activity !== false
+  const keep = Number(pick(String(options.history), ['10', '20', '50'], '20')) // visuals kept for /catchup
+  const stale = Number(pick(String(options.retention), ['7', '30', '90'], '30')) * DAY // other sessions' history is dropped after this
   let open: number | null = null // the `at` of the entry /catchup has expanded; null: the newest
 
   const held: Held = { cache: null }
 
   // Band notes are written in order but off the tool's path: a tool never waits on them.
   let notes: Promise<unknown> = Promise.resolve()
+  let prompts = 0 // bumped per prompt: a goal Haiku names late for an older prompt is dropped
   const note = (f: () => Promise<unknown>) => void (notes = notes.then(f).catch(() => {}))
 
   // When you last typed: visuals after it are what you missed. Notifications,
   // schedules and peers submit too, but don't mean you saw anything.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
-      await $.store.set(`p:${await $.session.id()}`, await $.clock.now())
+      const id = await $.session.id()
+      const at = await $.clock.now()
+      await $.store.set(`p:${id}`, at)
+      if (held.cache?.id === id) held.cache.seen = at
+      if (!activity) return next(e) // no goal: nothing names it, and no Haiku call
       const goal = goalOf(e.text)
+      const turn = ++prompts
       if (goal) note(() => $.state.set(NOW, { goal }))
+      else void nameGoal($, e.text).then(g => { if (g && turn === prompts) note(() => merge($, { goal: g })) })
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // never let bookkeeping block a prompt
@@ -56,7 +71,7 @@ export const register: Register = (on, options) => {
     $.ui.status(undefined) // the headline is drawn above the prompt instead
     try {
       const id = await $.session.id()
-      const cutoff = (await $.clock.now()) - STALE
+      const cutoff = (await $.clock.now()) - stale
       for (const key of await $.store.keys()) {
         if (!key.startsWith('h:') || key === `h:${id}`) continue
         const saved = (await $.store.get(key)) as Saved[] | undefined
@@ -69,107 +84,148 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // The latest visual's headline above the prompt, with Boo beside it in the
-  // terminal: moving while the model works, reacting to how the visual went.
-  // The `companion` option picks small (braille, one row), big (two rows) or off.
+  // Above the prompt, for someone switching back in: what the work is for, where it
+  // landed (an open blocker before any newer headline), what came in since they last
+  // typed, and any agents still running. While the model works: the goal and task,
+  // with the step it is on given way to first. Boo sits beside it in the terminal.
+  // The `companion` option picks small (braille, one row), big (two rows) or off;
+  // the boo* options how it's painted and whether it moves.
   let workingSince: number | null = null
   let timer: { cancel: () => void } | null = null
+  let aging: { cancel: () => void } | null = null
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     timer?.cancel()
     timer = null
-    if (e.props.hasSurvey) return next(e)
-    const last = (await history($, held)).saved.at(-1)
+    aging?.cancel()
+    aging = null
+    if (!showBand || e.props.hasSurvey) return next(e)
+    const hist = await history($, held)
+    const last = hist.saved.at(-1)
     if (!last) return next(e)
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
     const now = await $.clock.now()
-    workingSince = e.props.isWorking ? (workingSince ?? now) : null
+    const working = !!e.props.isWorking
+    workingSince = working ? (workingSince ?? now) : null
     // Read while drawing, so each tool call redraws the band.
-    const live = e.props.isWorking ? ((await $.state.get(NOW)).value ?? null) : null
-    const head = [live?.goal, live?.task].filter(Boolean).join(' · ')
-    const busy = !!(head || live?.step)
+    const live = activity ? ((await $.state.get(NOW)).value ?? null) : null
+    const head = working ? [live?.goal, progress(live)].filter(Boolean).join(' · ') : ''
+    const step = working ? live?.step : undefined
+    const busy = !!(head || step)
+    const n = await running($)
+    const agents = n ? `${n} agent${n === 1 ? '' : 's'} running` : ''
+
+    const shown = outcome(hist.saved)
+    const fresh = hist.saved.filter(s => s.at > hist.seen).length
+    const meta = [shown === last ? ago(now - shown.at) : `open ${span(now - shown.at)}`, fresh > 1 ? `${fresh} new · /catchup` : '', agents]
+      .filter(Boolean)
+      .join(' · ')
+    // Idle, nothing else redraws the band: redraw it when the age it shows goes stale.
+    if (!working) aging = $.clock.after(now - shown.at < 3_600_000 ? 60_000 : 3_600_000, () => $.ui.invalidate('ui.render'))
 
     if (e.surface !== 'terminal' || !companion) {
       const { Text } = $.ui.resolve(e)
-      if (busy) return <Text wrap="truncate-end">{oneLine(head, live?.step, cols)}</Text>
+      if (busy) return <Text wrap="truncate-end">{segs(Text, doing(head, step, agents, cols))}</Text>
       return (
         <Text wrap="truncate-end">
-          <Text color={MOOD[last.mood]} dimColor={!MOOD[last.mood]}>{last.mood} </Text>
-          <Text dimColor>{cutWords(last.title, cols - 14)}  /catchup</Text>
+          <Text color={MOOD[shown.mood]} dimColor={!MOOD[shown.mood]}>{shown.mood} </Text>
+          {segs(Text, landed(live?.goal, shown.title, meta, cols - 2))}
         </Text>
       )
     }
 
     const { Box, Text, Raster } = $.ui.resolve(e)
-    const m = workingSince !== null ? 'working' : last.stuck !== undefined ? 'relieved' : booMood(last.spec)
+    const m = working ? 'working' : shown.stuck !== undefined ? 'relieved' : booMood(shown.spec)
     const since = workingSince ?? last.at
     const { requestId } = e
     const { columns, rows } = companion
-    const at = (t: number) => companion.draw(m, t)
+    // Without reactions the intro is skipped; held still, Boo rests in the pose it settles into.
+    const skip = reactions ? 0 : companion.settle(m)
+    const at = (t: number) => companion.draw(m, animate ? t + skip : companion.settle(m), look)
     // Sleep until the drawing next changes (looked ahead in 20ms steps), so a still Boo costs nothing.
     const until = (t: number, cells: string) => {
       for (let d = 20; d < 4000; d += 20) if (at(t + d) !== cells) return d
       return 4000
     }
-    let shown = at(now - since)
+    let drawn = at(now - since)
 
     // Repaint only when the cells change; stop once the band is gone.
-    const step = async () => {
+    const tick = async () => {
       const t = (await $.clock.now()) - since
       const cells = at(t)
-      if (cells !== shown) {
+      if (cells !== drawn) {
         const r = await $.ui.blit({ requestId, key: 'boo', cells })
         if (r.deny) return void (timer = null)
-        shown = cells
+        drawn = cells
       }
-      timer = $.clock.after(until(t, cells), step)
+      timer = $.clock.after(until(t, cells), tick)
     }
-    timer = $.clock.after(until(now - since, shown), step)
+    if (animate) timer = $.clock.after(until(now - since, drawn), tick)
 
     const room = cols - columns - 3
+    // Two rows: the goal above and the step dim below; idle, the outcome above and the goal dim below.
+    const body: Seg2[][] =
+      rows === 1
+        ? [busy ? doing(head, step, agents, room) : landed(live?.goal, shown.title, meta, room)]
+        : busy && head
+          ? [doing(head, undefined, agents, room), ...(step ? [[{ t: `› ${cut(step, room - 2)}`, dim: true }]] : [])]
+          : busy
+            ? [doing('', step, agents, room), [{ t: cutWords(shown.title, room), dim: true }]]
+            : [[{ t: cutWords(shown.title, room) }], [{ t: cutWords([live?.goal, meta].filter(Boolean).join(' · '), room), dim: true }]]
     return (
       <Box flexDirection="row" gap={1} marginTop={1}>
-        <Raster key="boo" columns={columns} rows={rows} cells={shown} />
+        <Raster key="boo" columns={columns} rows={rows} cells={drawn} />
         <Box flexDirection="column">
-          {busy && rows === 1 ? <Text wrap="truncate-end">{oneLine(head, live?.step, room)}</Text> : ''}
-          {/* Two rows: the goal above, the step dim below; with no goal, the step above the last headline. */}
-          {busy && rows > 1 && head ? <Text wrap="truncate-end">{cutWords(head, room)}</Text> : ''}
-          {busy && rows > 1 && head && live?.step ? <Text wrap="truncate-end" dimColor>{`› ${cut(live.step, room - 2)}`}</Text> : ''}
-          {busy && rows > 1 && !head ? <Text wrap="truncate-end">{`› ${cut(live!.step!, room - 2)}`}</Text> : ''}
-          {busy && (rows === 1 || head) ? '' : (busy ? [`${cutWords(last.title, room - 10)}  /catchup`] : rows > 1 ? lines(`${last.title}  /catchup`, room) : [`${cutWords(last.title, room - 10)}  /catchup`]).map((l, k) => (
-            <Text key={String(k)} wrap="truncate-end" dimColor>{l}</Text>
+          {body.map((l, k) => (
+            <Text key={String(k)} wrap="truncate-end">{segs(Text, l)}</Text>
           ))}
         </Box>
       </Box>
     )
   })
 
-  // What the agent is on, from its own tool calls: no model tokens. A skill names
+  // Agents that finish or start change the band's count: nothing else redraws it then.
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    $.ui.invalidate('ui.render')
+    return r
+  }).catch(($, e, next) => next(e))
+
+  // What the agent is on, from its own tool calls: no model tokens (only a plain prompt's goal costs a Haiku call). A skill names
   // the goal, its task list the task in progress, any other tool the step.
-  const tasks = new Map<string, string>() // task id → its in-progress wording, from TaskCreate
+  const tasks = new Map<string, { wording: string; done: boolean }>() // task id → its in-progress wording, from TaskCreate
+  const counts = () => ({ done: [...tasks.values()].filter(t => t.done).length, total: tasks.size })
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    if (!activity || e.agentId !== undefined) return next(e)
     const a = e as unknown as Record<string, any>
     if (e.tool === 'Skill') {
       const goal = skillGoal(String(a.skill ?? ''), String(a.args ?? ''))
       if (goal) note(() => merge($, { goal, task: undefined }))
     } else if (e.tool === 'TodoWrite') {
-      const t = (a.todos as Array<{ status: string; activeForm?: string; content: string }> | undefined)?.find(t => t.status === 'in_progress')
-      note(() => merge($, { task: t ? t.activeForm || t.content : undefined }))
+      const todos = (a.todos as Array<{ status: string; activeForm?: string; content: string }> | undefined) ?? []
+      const t = todos.find(t => t.status === 'in_progress')
+      const done = todos.filter(t => t.status === 'completed').length
+      note(() => merge($, { task: t ? t.activeForm || t.content : undefined, done, total: todos.length }))
     } else if (e.tool === 'TaskCreate') {
       const r = (await next(e)) as any
       const id = r?.result?.task?.id
-      if (id) tasks.set(String(id), a.activeForm || a.subject)
+      if (id) {
+        tasks.set(String(id), { wording: a.activeForm || a.subject, done: false })
+        note(() => merge($, counts()))
+      }
       return r
     } else if (e.tool === 'TaskUpdate') {
-      const wording = a.activeForm || a.subject || tasks.get(String(a.taskId))
+      const id = String(a.taskId)
+      const wording = a.activeForm || a.subject || tasks.get(id)?.wording
       if (a.status === 'in_progress' && wording) note(() => merge($, { task: wording }))
       else if (a.status === 'completed' || a.status === 'deleted') {
-        const done = tasks.get(String(a.taskId))
-        tasks.delete(String(a.taskId))
+        const was = tasks.get(id)?.wording
+        if (a.status === 'deleted') tasks.delete(id)
+        else if (tasks.has(id)) tasks.get(id)!.done = true
+        const c = counts()
         note(async () => {
           const cur = (await $.state.get(NOW)).value
-          if (cur?.task && cur.task === done) await merge($, { task: undefined })
+          await merge($, cur?.task && cur.task === was ? { ...c, task: undefined } : c)
         })
       }
     } else {
@@ -181,7 +237,7 @@ export const register: Register = (on, options) => {
 
   on('prompt.compose', async ($, e, next) => {
     const out = await next(e)
-    if (e.surfaces.length === 0) return out // headless (-p, SDK): no visual would be drawn, so don't ask for one
+    if (!guide || e.surfaces.length === 0) return out // visuals off, or headless (-p, SDK) where none would be drawn: don't ask for one
     return { sections: [...out.sections, { id: 'visual-companions:guide', text: GUIDE, scope: 'session' as const }] }
   })
 
@@ -207,7 +263,13 @@ export const register: Register = (on, options) => {
 
   // Remember the turn's visual: the headline above the prompt + history for /catchup.
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) note(() => $.state.set(NOW, null))
+    // The goal outlasts the turn: idle, the band shows it, and Haiku reads it to tell a follow-up from new work.
+    if (e.agentId === undefined) note(() => merge($, { task: undefined, done: undefined, total: undefined, step: undefined }))
+    else {
+      // A subagent finished: its status settles just after its answer.
+      $.ui.invalidate('ui.render')
+      $.clock.after(1000, () => $.ui.invalidate('ui.render'))
+    }
     if (e.agentId === undefined && e.answer.includes('```viz')) {
       const spec = split(e.answer).flatMap(p => ('viz' in p ? [p.viz] : [])).at(-1)
       if (spec) {
@@ -216,7 +278,7 @@ export const register: Register = (on, options) => {
         const entry: Saved = { at: await $.clock.now(), title: spec.title, mood: mood(spec).glyph, spec }
         const stuck = entry.mood === '✓' ? stuckSince(saved) : undefined
         if (stuck !== undefined) entry.stuck = entry.at - stuck
-        h.saved = [...saved, entry].slice(-KEEP)
+        h.saved = [...saved, entry].slice(-keep)
         await $.store.set(`h:${h.id}`, h.saved)
         $.ui.invalidate('ui.render')
       }
@@ -288,26 +350,23 @@ function visual({ Box, Text }: { Box: any; Text: any }, lines: Line[], key?: num
   )
 }
 
-/** `s` word-wrapped into at most two lines of `n` cells, the second cut if it overflows. */
-function lines(s: string, n: number): string[] {
-  if (w(s) <= n) return [s]
-  const words = s.split(' ')
-  let first = ''
-  while (words.length && w(first ? `${first} ${words[0]}` : words[0]) <= n) first = first ? `${first} ${words.shift()}` : words.shift()!
-  if (!first) return [cut(s, n)]
-  const rest = words.join(' ').replace(/^ +/, '')
-  return [first, w(rest) <= n ? rest : `${cutWords(rest.replace(/ +\/catchup$/, ''), n - 10)}  /catchup`]
+/** `v` when it is one of `allowed`, else `fallback`. */
+function pick<T extends string>(v: unknown, allowed: readonly T[], fallback: T): T {
+  return (allowed as readonly unknown[]).includes(v) ? (v as T) : fallback
 }
 
 const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).at(-1) ?? ''
 const quoted = (q: unknown) => `“${cut(String(q ?? ''), 32)}”`
 
-type Held = { cache: { id: string; saved: Saved[] } | null }
+type Held = { cache: { id: string; saved: Saved[]; seen: number } | null } // seen: when you last typed
 
 /** This session's history, kept in `held` so the band, redrawn on every tool call, skips the store. */
 async function history($: EngineInterface, held: Held) {
   const id = await $.session.id()
-  if (held.cache?.id !== id) held.cache = { id, saved: ((await $.store.get(`h:${id}`)) as Saved[] | undefined) ?? [] }
+  if (held.cache?.id !== id) {
+    const saved = ((await $.store.get(`h:${id}`)) as Saved[] | undefined) ?? []
+    held.cache = { id, saved, seen: Number((await $.store.get(`p:${id}`)) ?? 0) }
+  }
   return held.cache
 }
 
@@ -318,6 +377,34 @@ async function merge($: EngineInterface, patch: Now) {
     const cur = (await $.state.get(NOW)).value ?? {}
     await $.state.set(NOW, { ...cur, ...patch })
   } catch {}
+}
+
+const GOAL_SYSTEM = `You label what a developer's coding session is working on, for a status line.
+Reply with the goal only: 2 to 6 words, sentence case, no trailing period, no quotes.
+Name the work, not the wording: "Fix Safari login redirect", not "User asks about redirect".
+If the new message continues or adjusts the current goal (a yes, a correction, a detail), reply with the current goal unchanged.
+If there is no current goal and the message has no clear task, reply NONE.`
+
+/** A plain prompt's goal, named by Haiku with the current goal as context; undefined when it can't say. */
+async function nameGoal($: EngineInterface, text: string): Promise<string | undefined> {
+  const plain = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\[(Image|Pasted text) #\d+[^\]]*\]/g, '[attachment]').replace(/\s+/g, ' ').trim()
+  if (!plain || plain === '[attachment]') return undefined
+  try {
+    const cur = (await $.state.get(NOW)).value?.goal
+    const r = await $.model.complete({
+      model: 'haiku',
+      system: GOAL_SYSTEM,
+      prompt: `Current goal: ${cur ?? '(none)'}\n\nNew message:\n${plain.slice(0, 2000)}`,
+      maxTokens: 30,
+      effort: 'low',
+      timeoutMs: 8000,
+    })
+    if (!r.isAnswered) return undefined
+    const g = r.text.trim().split('\n')[0].replace(/^["'`]+|["'`.]+$/g, '').trim()
+    return g && g !== 'NONE' ? cutWords(g, 48) : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** `code-review` → `Code review`. */
@@ -331,23 +418,59 @@ export function skillGoal(skill: string, args = ''): string | undefined {
   return skill.includes(':') && name === plugin && sub && /^[a-z][\w-]*$/.test(sub) ? `${human(name)} ${sub}` : human(name)
 }
 
-/** What a prompt is for, in a few words: the slash command it runs, else its opening words. */
+/** What a prompt is for, when it says so itself: the slash command it runs. A plain prompt goes to Haiku (nameGoal). */
 export function goalOf(text: string): string | undefined {
   const tag = /<command-name>\/?([^<]+)<\/command-name>/.exec(text)
   if (tag) return skillGoal(tag[1].trim(), /<command-args>([^<]*)<\/command-args>/.exec(text)?.[1] ?? '')
   const slash = /^\s*\/([\w:-]+)(.*)$/s.exec(text)
   if (slash) return skillGoal(slash[1], slash[2])
-  const plain = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\[(Image|Pasted text) #\d+[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim()
-  const first = /^(.+?[.?!])(\s|$)/.exec(plain)?.[1] ?? plain
-  return first ? cutWords(first.replace(/[.?!]$/, ''), 48) : undefined
+  return undefined
 }
 
-/** `goal · task › step` on one line of `n` cells: the step gives way first, then the task. */
-function oneLine(head: string, step: string | undefined, n: number): string {
-  if (!step) return cutWords(head, n)
-  if (!head) return `› ${cut(step, n - 2)}`
-  if (w(head) + 3 + Math.min(w(step), 16) <= n) return `${head} › ${cut(step, n - w(head) - 3)}`
-  return cutWords(head, n)
+type Seg2 = { t: string; dim?: boolean }
+
+function segs(Text: any, l: Seg2[]) {
+  return l.map((s, k) => (
+    <Text key={String(k)} dimColor={s.dim}>
+      {s.t}
+    </Text>
+  ))
+}
+
+/** The task, or with none the list, and how far through the list it is: `Checking the spec 2/5`. */
+function progress(now: Now | null): string | undefined {
+  const of = now?.total && now.total > 1 ? `${now.done ?? 0}/${now.total}` : ''
+  return [now?.task, of].filter(Boolean).join(' ') || undefined
+}
+
+/** What the agent is on, in `n` cells: the goal and task, the step only when there is neither, and the agents dim. */
+function doing(head: string, step: string | undefined, agents: string, n: number): Seg2[] {
+  const tail = agents && w(agents) + 3 <= n - 16 ? [{ t: ` · ${agents}`, dim: true }] : []
+  const room = n - (tail.length ? w(tail[0].t) : 0)
+  return [{ t: head ? cutWords(head, room) : step ? `› ${cut(step, room - 2)}` : '' }, ...tail]
+}
+
+/** Where the work landed, in `n` cells: `goal → outcome  meta`. The goal gives way first, then the meta. */
+function landed(goal: string | undefined, title: string, meta: string, n: number): Seg2[] {
+  const m = meta && w(meta) + 2 <= n - 16 ? [{ t: `  ${meta}`, dim: true }] : []
+  const room = n - (m.length ? w(m[0].t) : 0)
+  const lead = goal && goal !== title && w(goal) + 3 + w(title) <= room ? [{ t: `${goal} → `, dim: true }] : []
+  return [...lead, { t: cutWords(title, room) }, ...m]
+}
+
+/** The visual the band leads with: the latest red one since the last green, else the latest. */
+function outcome(saved: Saved[]): Saved {
+  const k = saved.findLastIndex(s => s.mood === '✓')
+  return saved.slice(k + 1).findLast(s => s.mood === '✗') ?? saved.at(-1)!
+}
+
+/** Subagents and teammates still at work; 0 where the list can't be read. */
+async function running($: EngineInterface): Promise<number> {
+  try {
+    return (await $.agent.list()).filter(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting').length
+  } catch {
+    return 0
+  }
 }
 
 /** A tool call as a few words: Bash's own description, else the tool and its target. */

@@ -50,8 +50,42 @@ export function parse(src: string): Spec | null {
     const [label, ...note] = body.split(' | ')
     spec.items.push({ status, label: label.trim(), note: note.join(' | ').trim() || undefined, depth })
   }
+  // A chart with no row it can plot is left as the code block it was written as.
+  const row = ROW[form]
+  if (row && !spec.items.some(i => row(i.label))) return null
   return spec.items.length ? spec : null
 }
+
+// Magnitudes, durations and sizes, so `1.2k` beats `900` and `2s` beats `420ms`. A bare `m` stays a unit: minutes, metres or millions.
+const SCALE: Record<string, number> = {
+  k: 1e3, K: 1e3, M: 1e6, B: 1e9, bn: 1e9,
+  ns: 1e-9, µs: 1e-6, us: 1e-6, ms: 1e-3, s: 1, min: 60, h: 3600,
+  KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12,
+}
+
+/** `89`, `420ms`, `$1,200`, `1.2k`, `0.4 s` → its value and how it was written; null when it isn't one number. */
+export function amount(s: string): { v: number; text: string } | null {
+  const m = /^([^\d\s.-]*)(-?[\d,]*\.?\d+)\s*([a-zA-Zµ%/]*)$/.exec(s.trim())
+  if (!m || m[1].length > 3) return null
+  const v = Number(m[2].replace(/,/g, '')) * (SCALE[m[3]] ?? 1)
+  return isFinite(v) ? { v, text: s.trim() } : null
+}
+
+// One row of each chart, or null when it can't be plotted. Labels may hold a colon: the last one splits off the value.
+const deltaRow = (l: string) => {
+  const m = /^(.*?):\s*(.*?)\s*(?:->|→)\s*(.*?)(?:\s+([+-]))?$/.exec(l)
+  return m ? { label: m[1], b: m[2], a: m[3], v: m[4] } : null
+}
+const barRow = (l: string) => {
+  const m = /^(.*):\s*(.+?)\s*(\*)?$/.exec(l)
+  const a = m && amount(m[2])
+  return a ? { label: m[1], v: a.v, text: a.text, hi: !!m[3] } : null
+}
+const pointRow = (l: string) => {
+  const m = /^(.*):\s*(-?[\d.]+)[\s,]+(-?[\d.]+)\s*(\*)?$/.exec(l)
+  return m && isFinite(Number(m[2])) && isFinite(Number(m[3])) ? { label: m[1], x: Number(m[2]), y: Number(m[3]), chosen: !!m[4] } : null
+}
+const ROW: Record<string, ((l: string) => unknown) | undefined> = { delta: deltaRow, bars: barRow, tradeoff: pointRow }
 
 /** Splits markdown into prose and parsed ```viz fences; unparseable fences stay prose.
  *  Fences are tracked line by line, so a ```viz example quoted inside a longer fence stays prose.
@@ -143,6 +177,10 @@ function noted(row: Line, note: string | undefined, room: number): Line[] {
   return [row, [sp(4), { t: cut(note, room - 4), tone: 'dim' }]]
 }
 
+/** A row the chart couldn't plot, kept as written so nothing the agent said is lost. */
+const loose = (label: string, note: string | undefined, room: number): Line[] =>
+  noted([{ t: cut(label, room), tone: 'dim' }], note, room)
+
 // ── forms ────────────────────────────────────────────────────────────────
 
 const frontier = (s: Spec) => s.items.findIndex(i => i.status !== 'done' && i.status !== 'dropped')
@@ -223,10 +261,8 @@ export function change(b: string, a: string): string {
 }
 
 function delta(s: Spec, room: number): Line[] {
-  const rows = s.items.map(i => {
-    const m = /^(.*?):\s*(.*?)\s*->\s*(.*?)(?:\s+([+-]))?$/.exec(i.label)
-    return { ...(m ? { label: m[1], b: m[2], a: m[3], v: m[4] } : { label: i.label, b: '—', a: '—', v: undefined }), note: i.note }
-  })
+  const all = s.items.map(i => ({ row: deltaRow(i.label), i }))
+  const rows = all.flatMap(r => (r.row ? [{ ...r.row, note: r.i.note }] : []))
   let lw = Math.max(...rows.map(r => w(r.label)))
   let bw = Math.max(...rows.map(r => w(r.b)))
   let aw = Math.max(...rows.map(r => w(r.a)))
@@ -241,7 +277,9 @@ function delta(s: Spec, room: number): Line[] {
   // Still too wide: shorten labels first, then the values.
   if (total() > room) lw = Math.max(4, lw - (total() - room))
   while (total() > room && (bw > 4 || aw > 4)) bw >= aw ? bw-- : aw--
-  return rows.flatMap(r => {
+  return all.flatMap(({ row: parsed, i }) => {
+    if (!parsed) return loose(i.label, i.note, room)
+    const r = { ...parsed, note: i.note }
     const c = change(r.b, r.a)
     const same = r.b === r.a
     const label = cut(r.label, lw), b = cut(r.b, bw), a = cut(r.a, aw)
@@ -259,21 +297,25 @@ function delta(s: Spec, room: number): Line[] {
 }
 
 function bars(s: Spec, room: number): Line[] {
-  const items = s.items.map(i => {
-    const m = /^(.*?):\s*(-?[\d.]+)\s*(\*)?$/.exec(i.label)
-    return { label: m ? m[1] : i.label, v: m ? Number(m[2]) : 0, hi: !!m?.[3], note: i.note }
-  })
   const unit = s.opts.unit ?? ''
+  // Values draw as written; a bare number takes the `unit` option.
+  const all = s.items.map(i => {
+    const r = barRow(i.label)
+    return { i, r: r && { ...r, text: /\d$/.test(r.text) ? r.text + unit : r.text } }
+  })
+  const items = all.flatMap(({ r }) => (r ? [r] : []))
   // Bars grow from zero: a negative value draws an empty track beside its number.
-  const top = [Number(s.opts.max), Math.max(...items.map(i => i.v))].find(x => x > 0) ?? 1
-  const th = s.opts.bar !== undefined ? Number(s.opts.bar) : undefined
+  const top = [amount(s.opts.max ?? '')?.v, Math.max(...items.map(i => i.v))].find(x => x !== undefined && x > 0) ?? 1
+  const th = s.opts.bar !== undefined ? amount(s.opts.bar)?.v : undefined
   const lw = Math.max(...items.map(i => w(i.label)))
-  const vw = Math.max(...items.map(i => w(`${i.v}${unit}`)))
+  const vw = Math.max(...items.map(i => w(i.text)))
   const span = Math.max(10, room - lw - vw - 7)
   const at = th !== undefined && isFinite(th) ? Math.round((th / top) * span) : undefined
   const tcol = at !== undefined && at >= 0 && at < span ? at : undefined
-  const out: Line[] = items.flatMap(i => {
-    const eighths = Math.round((Math.max(0, Math.min(i.v, top)) / top) * span * 8)
+  const out: Line[] = all.flatMap(({ i: src, r: i }) => {
+    if (!i) return loose(src.label, src.note, room)
+    // A positive value always shows at least a sliver, so it never reads as zero.
+    const eighths = Math.max(i.v > 0 ? 1 : 0, Math.round((Math.max(0, Math.min(i.v, top)) / top) * span * 8))
     const full = Math.floor(eighths / 8)
     const part = eighths % 8
     const bar = '█'.repeat(full) + (part ? ' ▏▎▍▌▋▊▉'[part] : '')
@@ -283,12 +325,12 @@ function bars(s: Spec, room: number): Line[] {
       const k = tcol - w(bar)
       segs.push({ t: track.slice(0, k), tone: 'dim' }, { t: '┆', tone: 'warn' }, { t: track.slice(k + 1), tone: 'dim' })
     } else segs.push({ t: track, tone: 'dim' })
-    const val = `${i.v}${unit}`
+    const val = i.text
     segs.push({ t: '  ' + ' '.repeat(vw - w(val)) + val, tone: i.hi ? 'title' : undefined })
     if (i.hi) segs.push({ t: '  ◀', tone: 'pick' })
-    return noted(segs, i.note, room)
+    return noted(segs, src.note, room)
   })
-  if (tcol !== undefined) out.push([sp(lw + 2 + tcol), { t: `╰ ${th}${unit} bar`, tone: 'warn' }])
+  if (tcol !== undefined) out.push([sp(lw + 2 + tcol), { t: `╰ ${/\d$/.test(s.opts.bar!) ? s.opts.bar + unit : s.opts.bar} bar`, tone: 'warn' }])
   return out
 }
 
@@ -307,15 +349,16 @@ function tradeoff(s: Spec, room: number): Line[] {
   // Group options by plotted cell so a shared cell never hides one of them.
   type Pt = { x: number; y: number; names: string[]; chosen: boolean; notes: string[] }
   const pts: Pt[] = []
+  const unplotted: Line[] = []
   for (const i of s.items) {
-    const m = /^(.*?):\s*([\d.]+)\s+([\d.]+)\s*(\*)?$/.exec(i.label)
-    if (!m) continue
-    const x = Math.min(W - 1, Math.max(0, Math.round(Number(m[2]) * (W - 1))))
-    const y = Math.min(H - 1, Math.max(0, Math.round((1 - Number(m[3])) * (H - 1))))
+    const m = pointRow(i.label)
+    if (!m) { unplotted.push(...loose(i.label, i.note, room)); continue }
+    const x = Math.min(W - 1, Math.max(0, Math.round(m.x * (W - 1))))
+    const y = Math.min(H - 1, Math.max(0, Math.round((1 - m.y) * (H - 1))))
     const p = pts.find(q => q.x === x && q.y === y) ?? (pts.push({ x, y, names: [], chosen: false, notes: [] }), pts[pts.length - 1])
-    p.names.push(m[1])
-    p.chosen ||= !!m[4]
-    if (i.note) p.notes.push(`${m[1]}: ${i.note}`)
+    p.names.push(m.label)
+    p.chosen ||= m.chosen
+    if (i.note) p.notes.push(`${m.label}: ${i.note}`)
   }
   // Every point first, then labels into the space left, so no label covers a point.
   for (const p of pts) put(p.y, p.x, p.chosen ? '★' : '●', p.chosen ? 'pick' : 'data')
@@ -353,6 +396,7 @@ function tradeoff(s: Spec, room: number): Line[] {
       : [[{ t: '╰' + '─'.repeat(W + 1) + '▶', tone: 'dim' as Tone }], [sp(W + 3 - w(cut(s.opts.x ?? '', W + 3))), { t: cut(s.opts.x ?? '', W + 3), tone: 'dim' as Tone }]]),
     ...(legend.length ? [[], ...legend] : []),
     ...(notes.length ? [[], ...notes] : []),
+    ...(unplotted.length ? [[], ...unplotted] : []),
   ]
 }
 
