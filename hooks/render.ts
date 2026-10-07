@@ -496,8 +496,105 @@ function tradeoff(s: Spec, room: number): Line[] {
 
 // ── frame ────────────────────────────────────────────────────────────────
 
-/** The framed visual, fitted to `columns` (capped at 72). */
-export function draw(spec: Spec, columns = 80): Line[] {
+// ── living visuals ───────────────────────────────────────────────────────
+// A visual with `@ id=<name>` is redrawn under that id as the work moves. Each redraw is a version;
+// what changed since an earlier one is listed under the body, the same way for every form.
+
+export type Change =
+  | { kind: 'new' | 'removed'; label: string }
+  | { kind: 'status'; label: string; from: Status; to: Status; note?: string } // note: its new note, when that changed too
+  | { kind: 'value' | 'note'; label: string; from: string; to: string }
+
+/** A row's identity across versions: its label for marked forms (at any depth), the part before the value for charts. */
+function keyOf(form: string, i: Item): { key: string; value: string } {
+  if (STATUS_FORMS.has(form)) return { key: i.label, value: '' }
+  const k = i.label.lastIndexOf(':')
+  return k === -1 ? { key: i.label, value: '' } : { key: i.label.slice(0, k).trim(), value: i.label.slice(k + 1).trim() }
+}
+const STATUS_FORMS = new Set(['flow', 'path', 'tree'])
+
+const words = (s: string) => new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter(x => x.length >= 3))
+
+/** How alike two labels are: shared words over the shorter label's words, 0..1. */
+function alike(a: string, b: string): number {
+  const wa = words(a), wb = words(b)
+  const n = Math.min(wa.size, wb.size)
+  return n ? [...wa].filter(x => wb.has(x)).length / n : 0
+}
+
+/**
+ * Which row of `prev` each row of `cur` is: the same label first, then a reworded one (half the
+ * shorter label's words shared), so an agent tidying its wording doesn't read as rows replaced.
+ */
+function pair(prev: Spec, cur: Spec): Map<Item, Item> {
+  const out = new Map<Item, Item>()
+  const free = new Set(prev.items)
+  for (const i of cur.items) {
+    const was = [...free].find(p => keyOf(prev.form, p).key === keyOf(cur.form, i).key)
+    if (was) { out.set(i, was); free.delete(was) }
+  }
+  const pairs = cur.items.filter(i => !out.has(i)).flatMap(i => [...free].map(p => ({ i, p, score: alike(keyOf(cur.form, i).key, keyOf(prev.form, p).key) })))
+  for (const { i, p, score } of pairs.sort((a, b) => b.score - a.score)) {
+    if (score < 0.5 || out.has(i) || !free.has(p)) continue
+    out.set(i, p)
+    free.delete(p)
+  }
+  return out
+}
+
+/** What changed from `prev` to `cur`, in `cur`'s order, removed rows last. */
+export function changes(prev: Spec, cur: Spec): Change[] {
+  const match = pair(prev, cur)
+  const out: Change[] = []
+  for (const i of cur.items) {
+    const { key, value } = keyOf(cur.form, i)
+    const label = STATUS_FORMS.has(cur.form) ? i.label : key
+    const was = match.get(i)
+    if (!was) { out.push({ kind: 'new', label }); continue }
+    // One entry per row: a status change carries the new note with it.
+    const old = keyOf(prev.form, was).value
+    const noted = (was.note ?? '') !== (i.note ?? '')
+    if (was.status !== i.status) out.push({ kind: 'status', label, from: was.status, to: i.status, ...(noted && i.note ? { note: i.note } : {}) })
+    else if (old !== value) out.push({ kind: 'value', label, from: old, to: value })
+    else if (noted) out.push({ kind: 'note', label, from: was.note ?? '', to: i.note ?? '' })
+  }
+  const kept = new Set(match.values())
+  for (const p of prev.items) if (!kept.has(p)) out.push({ kind: 'removed', label: STATUS_FORMS.has(prev.form) ? p.label : keyOf(prev.form, p).key })
+  return out
+}
+
+/** A visual's place among its versions: which it is, and the one it is compared with. */
+export type Living = { version: number; base?: { version: number; spec: Spec } }
+
+const SHOWN_CHANGES = 5
+
+function changeLines(list: Change[], since: number, room: number): Line[] {
+  if (list.length === 0) return [[{ t: `↻ no change since v${since}`, tone: 'dim' }]]
+  const count = (k: Change['kind'][]) => list.filter(c => k.includes(c.kind)).length
+  const parts = [[count(['new']), 'new'], [count(['status', 'value', 'note']), 'changed'], [count(['removed']), 'removed']] as const
+  const head = parts.filter(([n]) => n).map(([n, word]) => `${n} ${word}`).join(' · ')
+  const out: Line[] = [[{ t: `↻ since v${since}: ${head}`, tone: 'dim' }]]
+  for (const c of list.slice(0, SHOWN_CHANGES)) {
+    if (c.kind === 'new') out.push([{ t: '+ ', tone: 'ok' }, { t: cut(c.label, room - 2) }])
+    else if (c.kind === 'removed') out.push([{ t: `− ${cut(c.label, room - 2)}`, tone: 'dim' }])
+    else if (c.kind === 'status') {
+      const label = cut(c.label, room - 7)
+      const note = c.note && room - 7 - w(label) - 3 >= 8 ? [{ t: ' · ' + cut(c.note, room - 7 - w(label) - 3), tone: 'dim' as Tone }] : []
+      out.push([mark(c.from), { t: ' → ', tone: 'dim' }, mark(c.to), { t: '  ' + label }, ...note])
+    } else if (c.kind === 'note') {
+      const label = cut(c.label, Math.max(8, Math.floor(room / 2)))
+      out.push([{ t: '~ ', tone: 'warn' }, { t: label }, { t: ' · ' + cut(c.to || 'note removed', Math.max(6, room - w(label) - 5)), tone: 'dim' }])
+    } else if (c.kind === 'value') {
+      const left = cut(c.label, Math.max(8, Math.floor(room / 2)))
+      out.push([{ t: '~ ', tone: 'warn' }, { t: left }, { t: '  ' + cut(`${c.from || '–'} → ${c.to || '–'}`, Math.max(6, room - w(left) - 4)), tone: 'dim' }])
+    }
+  }
+  if (list.length > SHOWN_CHANGES) out.push([{ t: `… ${list.length - SHOWN_CHANGES} more`, tone: 'dim' }])
+  return out
+}
+
+/** The framed visual, fitted to `columns` (capped at 72). A living one shows its version and what changed since `living.base`. */
+export function draw(spec: Spec, columns = 80, living?: Living): Line[] {
   const width = Math.max(40, Math.min(72, columns))
   const room = width - 3
   const body =
@@ -510,9 +607,14 @@ export function draw(spec: Spec, columns = 80): Line[] {
     : tradeoff(spec, room)
   const rail = mood(spec).tone
   const done = spec.items.filter(i => i.status === 'done').length
-  const meta = spec.form === 'flow' || spec.form === 'path' ? `  ${done}/${spec.items.filter(i => i.status !== 'dropped').length}` : ''
+  const progress = spec.form === 'flow' || spec.form === 'path' ? `${done}/${spec.items.filter(i => i.status !== 'dropped').length}` : ''
+  const meta = [progress, living && living.version > 1 ? `v${living.version}` : ''].filter(Boolean).map(m => '  ' + m).join('')
   const out: Line[] = [[{ t: '╭─ ', tone: rail }, { t: cutWords(spec.title, width - 3 - w(meta)), tone: 'title' }, ...(meta ? [{ t: meta, tone: 'dim' as Tone }] : [])], [{ t: '│', tone: rail }]]
   for (const l of body) out.push([{ t: '│', tone: rail }, ...(l.length ? [sp(2), ...l] : [])])
+  if (living?.base) {
+    out.push([{ t: '│', tone: rail }])
+    for (const l of changeLines(changes(living.base.spec, spec), living.base.version, room - 2)) out.push([{ t: '│', tone: rail }, sp(2), ...l])
+  }
   out.push([{ t: '│', tone: rail }])
   if (spec.soWhat) {
     // A question for the user stands out from a plain next step: it is what they must act on.

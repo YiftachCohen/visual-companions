@@ -3,10 +3,10 @@ import type { EngineInterface, Register } from 'claude-code'
 import { big, booMood } from './boo'
 import type { Companion, Look } from './boo'
 import { small } from './boo-small'
-import { card, checkpointCard, commandKey, cutsOf, keepInstructions, lanes, noticeText, ribbon, RIBBON_MIN, span, spinning, tokens, turnsOf } from './land'
-import type { Checkpoint, Kept, Lane, Turn } from './land'
+import { card, checkpointCard, clashText, CLASH_WINDOW, collisions, commandKey, crowded, cutsOf, keepInstructions, lanes, noticeText, span, spinning, tokens, turnsOf } from './land'
+import type { Checkpoint, Edits, Kept, Lane, Peer, Turn } from './land'
 import { cut, cutWords, draw, mood, split, w } from './render'
-import type { Line, Spec, Tone } from './render'
+import type { Line, Living, Spec, Tone } from './render'
 import type { AgentNote, Now } from './contract'
 
 // Everything the model pays for is this section (cached with the system
@@ -16,7 +16,8 @@ const GUIDE = `Visual companions: when a message reports a finding, result, deci
 First line: <form> <headline as a claim>. Forms: flow (progress through steps), path (where in a system something happens: components in order), tree (causes or plan; indent 2 spaces per level), delta (what changed), bars (comparison), tradeoff (a choice on two axes), matrix (options against several criteria).
 flow/path/tree item marks: + done, * active, x blocked, . todo, - dropped. Keep flow step labels ≤14 chars. "label | note" adds a note.
 delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>" (required), rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen).
-"> one line" ends it: why it matters or what's next. "> ? question" instead when you need the user's decision or answer to go on.`
+"> one line" ends it: why it matters or what's next. "> ? question" instead when you need the user's decision or answer to go on.
+"@ id=<name>" on a visual you will update as the work moves (a plan, a hypothesis tree, a board): redraw it with the same id and the same row labels, and the user sees what changed.`
 
 // Added to each subagent's task while `activity` is on: ~20 tokens per spawn.
 const HEADLINE = 'Start your final answer with a one-line headline that states the outcome as a claim.'
@@ -25,7 +26,7 @@ const PANE = 'catchup'
 const RECENT = 8 // history rows /catchup lists before "Show all"
 const DAY = 86_400_000
 const AWAY = 10 * 60_000 // this long since you last typed, the band grows into the return card
-const TURNS = 200 // turns kept for the ribbon
+const TURNS = 200 // turns kept for the return card
 const EDITS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
 
 const NOW = { plugin: 'visual-companions', key: 'now' } as const
@@ -95,16 +96,16 @@ export const register: Register = (on, options) => {
       const cutoff = (await $.clock.now()) - stale
       // A session was last active at its latest visual or turn, whichever is later.
       const keys = await $.store.keys()
-      const ids = new Set(keys.filter(k => /^[ht]:/.test(k)).map(k => k.slice(2)))
+      const ids = new Set(keys.filter(k => /^[hte]:/.test(k)).map(k => k.slice(2)))
       ids.delete(id)
       for (const sid of ids) {
         let last = 0
-        for (const k of ['h', 't']) {
+        for (const k of ['h', 't', 'e']) {
           if (!keys.includes(`${k}:${sid}`)) continue
-          const kept = (await $.store.get(`${k}:${sid}`)) as Array<{ at?: number }> | undefined
-          last = Math.max(last, Number(kept?.at(-1)?.at ?? 0))
+          const kept = (await $.store.get(`${k}:${sid}`)) as Array<{ at?: number }> | { at?: number } | undefined
+          last = Math.max(last, Number((Array.isArray(kept) ? kept.at(-1)?.at : kept?.at) ?? 0))
         }
-        if (last < cutoff) for (const k of ['h', 'p', 'd', 't', 'c']) await $.store.delete(`${k}:${sid}`)
+        if (last < cutoff) for (const k of ['h', 'p', 'd', 't', 'c', 'e']) await $.store.delete(`${k}:${sid}`)
       }
     } catch {} // housekeeping only
     return next(e)
@@ -137,8 +138,12 @@ export const register: Register = (on, options) => {
     // Read while drawing, so each tool call redraws the band.
     const live = activity ? ((await $.state.get(NOW)).value ?? null) : null
     const head = working ? [live?.goal, progress(live)].filter(Boolean).join(' · ') : ''
-    // Going in circles outranks the step: it is the one thing in the band that asks you to look.
-    const spin = working ? spinning(fails, edits, now) : undefined
+    // Another session (or a second agent here) on a file this session edited: read the others at most every 20s.
+    const recent = Object.values(mine).some(t => now - t <= CLASH_WINDOW)
+    if (recent && now - peers.at > 20_000) peers = { at: now, list: await peersOf($, hist.id, now) }
+    const clash = recent ? clashText(collisions(mine, peers.list, now), crowded(editors, now), now) : undefined
+    // Going in circles or a clash outranks the step: they are what in the band asks you to look.
+    const spin = working ? (spinning(fails, edits, now) ?? clash) : undefined
     const step = working ? (spin ?? live?.step) : undefined
     const busy = !!(head || step)
     const n = await running($)
@@ -155,10 +160,14 @@ export const register: Register = (on, options) => {
       .filter(Boolean)
       .join(' · ')
     // Back after a while: the band grows into the return card, what happened since you last typed.
-    const extra = working ? [] : await returning($, hist, lead, ask, now, cols - (e.surface === 'terminal' && companion ? companion.columns + 3 : 2), e.props.maxRows - (e.surface === 'terminal' && companion ? 1 + companion.rows : 1))
+    const width = cols - (e.surface === 'terminal' && companion ? companion.columns + 3 : 2)
+    const rowsLeft = e.props.maxRows - (e.surface === 'terminal' && companion ? 1 + companion.rows : 1)
+    const warn: Line[] = !working && clash && rowsLeft >= 1 ? [[{ t: cut(clash, width), tone: 'warn' }]] : []
+    const extra = working ? [] : [...warn, ...(await returning($, hist, lead, ask, now, width, rowsLeft - warn.length))]
     // Idle, nothing else redraws the band: redraw it when the age it shows goes stale, or when the card is due.
     const due = hist.seen > 0 && now - hist.seen < AWAY ? hist.seen + AWAY - now : Infinity
-    if (!working) aging = $.clock.after(Math.min(due, now - lead.at < 3_600_000 ? 60_000 : 3_600_000), () => $.ui.invalidate('ui.render'))
+    // While this session's edits are recent, another session's can clash with them: look again each minute.
+    if (!working) aging = $.clock.after(Math.min(due, now - lead.at < 3_600_000 || recent ? 60_000 : 3_600_000), () => $.ui.invalidate('ui.render'))
 
     if (e.surface !== 'terminal' || !companion) {
       const { Box, Text } = $.ui.resolve(e)
@@ -248,19 +257,33 @@ export const register: Register = (on, options) => {
   // loaded mid-task (a design guide) is a means, and as the goal it outlived the work it was loaded for.
   const tasks = new Map<string, { wording: string; done: boolean }>() // task id → its in-progress wording, from TaskCreate
   const counts = () => ({ done: [...tasks.values()].filter(t => t.done).length, total: tasks.size })
-  // This turn's work for the ribbon and the return card: tool calls (bookkeeping aside, agents' included) and files edited.
+  // This turn's work for the return card: tool calls (bookkeeping aside, agents' included) and files edited.
   let turnTools = 0
   let turnFiles = new Set<string>()
   // The thrash alarm's record: each command's failures in a row, each file's edit times.
   const fails = new Map<string, number[]>()
   const edits = new Map<string, number[]>()
+  // The collision radar's: this session's last edit of each file, which of its loops edited each, and the
+  // other sessions' edits as last read (at most every 20s, and right after an edit here).
+  const mine: Edits = {}
+  const editors = new Map<string, Map<string, number>>()
+  let peers: { at: number; list: Peer[] } = { at: -Infinity, list: [] }
   on('tool.call', async ($, e, next) => {
     const a = e as unknown as Record<string, any>
     if (stepOf(a) !== undefined) turnTools++
     const file = EDITS.has(e.tool) ? (a.file_path ?? a.notebook_path) : undefined
     if (typeof file === 'string' && file) {
       turnFiles.add(file)
-      note(async () => edits.set(file, [...(edits.get(file) ?? []), await $.clock.now()].slice(-20)))
+      const editor = e.agentId ?? 'main'
+      note(async () => {
+        const at = await $.clock.now()
+        edits.set(file, [...(edits.get(file) ?? []), at].slice(-20))
+        // The collision radar: who in this session edits it, and this session's edits as other sessions see them.
+        editors.set(file, new Map(editors.get(file)).set(editor, at))
+        mine[file] = at
+        await shareEdits($, mine, activity, at)
+        peers.at = -Infinity // look at the others again now: this edit may be the clash
+      })
     }
     if (!activity) return next(e)
     // A subagent's or teammate's call: only its step, kept per agent for /catchup.
@@ -335,11 +358,13 @@ export const register: Register = (on, options) => {
     const prose = parts.flatMap(p => ('md' in p ? [p.md] : [])).join('').trim()
     const cols = (e.viewport?.columns ?? 80) - 2
     const { Box } = $.ui.resolve(e)
+    // A living visual (`@ id=`) shows its version and what changed since the one before it.
+    const hist = specs.some(s => s.opts.id) ? (await history($, held)).saved : []
     const rest = prose ? await next({ ...e, props: { ...e.props, text: prose } }) : null
     return (
       <Box flexDirection="column">
         <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
-          {specs.map((s, k) => visual($.ui.resolve(e), draw(s, cols), k))}
+          {specs.map((s, k) => visual($.ui.resolve(e), draw(s, cols, inTranscript(hist, s)), k))}
         </Box>
         {rest}
       </Box>
@@ -380,7 +405,7 @@ export const register: Register = (on, options) => {
         h.saved = [...saved, entry].slice(-keep)
         await $.store.set(`h:${h.id}`, h.saved)
       }
-      // The ribbon's bar for this turn; a failure here costs the bar, never the turn.
+      // The turn's record for the return card; a failure here costs the record, never the turn.
       try {
         const turn: Turn = { at, tools, ms: e.durationMs, ...(entry ? { mood: entry.mood } : {}), ...(goal ? { goal } : {}), ...(files.length ? { files } : {}) }
         h.turns = [...h.turns, turn].slice(-TURNS)
@@ -393,7 +418,7 @@ export const register: Register = (on, options) => {
 
   // Compaction is where the agent forgets and the scrollback goes: ask the summary to keep what the
   // visuals say was decided, is blocked or waits on you, then mark the spot with a line in the
-  // transcript, a mark in the ribbon and a card in /catchup. No model tokens: the summarizer reads a few lines more.
+  // transcript and a card in /catchup. No model tokens: the summarizer reads a few lines more.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     const h = await history($, held)
@@ -427,7 +452,7 @@ export const register: Register = (on, options) => {
   // the rest of the history, newest first.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const { id, saved, seen, turns, cuts } = await history($, held)
+    const { id, saved, seen, cuts } = await history($, held)
     const now = await $.clock.now()
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
     const crew = activity ? await agentRows($, now) : []
@@ -443,9 +468,10 @@ export const register: Register = (on, options) => {
     const pickedCut = cuts.find(c => c.at === open)
     const picked = pickedCut ? undefined : (saved.find(s => s.at === open) ?? lead)
     // The history newest first, the compactions in among the visuals.
-    const rest: Array<Saved | Checkpoint> = [...saved.filter(s => s !== picked), ...cuts.filter(c => c !== pickedCut)].sort((a, b) => b.at - a.at)
+    // A living visual is listed once, by its latest version.
+    const latest = (s: Saved) => !s.spec.opts.id || saved.findLast(v => v.spec.opts.id === s.spec.opts.id) === s
+    const rest: Array<Saved | Checkpoint> = [...saved.filter(s => s !== picked && latest(s) && !(picked?.spec.opts.id && s.spec.opts.id === picked.spec.opts.id)), ...cuts.filter(c => c !== pickedCut)].sort((a, b) => b.at - a.at)
     const list = all ? rest : rest.slice(0, RECENT)
-    const strip = turns.length >= RIBBON_MIN ? ribbon(turns, cols, now, seen, cuts.map(c => c.at)) : []
     const room = (used: number) => Math.max(10, cols - used)
     const glyph = (g: string) => <Text color={MOOD[g]} dimColor={!MOOD[g]}>{g} </Text>
     const head = (t: string) => <Text bold>{t}</Text>
@@ -453,9 +479,8 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         <Text>
           <Text bold>{fresh ? `${fresh} new` : 'Up to date'}</Text>
-          <Text dimColor>{` · ${saved.length} visual${saved.length === 1 ? '' : 's'}${named ? ` · ${goals.length} goal${goals.length === 1 ? '' : 's'}` : ''}${turns.length ? ` · ${turns.length} turn${turns.length === 1 ? '' : 's'}` : ''}`}</Text>
+          <Text dimColor>{` · ${saved.length} visual${saved.length === 1 ? '' : 's'}${named ? ` · ${goals.length} goal${goals.length === 1 ? '' : 's'}` : ''}`}</Text>
         </Text>
-        {strip.length > 0 && <Box marginTop={1}>{visual({ Box, Text }, strip)}</Box>}
         {asks.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             {head('Needs you')}
@@ -528,7 +553,7 @@ export const register: Register = (on, options) => {
               {picked.stuck !== undefined ? <Text color="success">{` · ${unblocked(picked.stuck)}`}</Text> : ''}
               {picked.at > seen ? <Text color="claude"> · new</Text> : ''}
             </Text>
-            {visual({ Box, Text }, draw(picked.spec, cols))}
+            {visual({ Box, Text }, draw(picked.spec, cols, sinceSeen(saved, picked, seen)))}
           </Box>
         )}
         {rest.length > 0 && (
@@ -543,7 +568,7 @@ export const register: Register = (on, options) => {
             ) : (
               <Box key={`v:${s.at}`}>
                 {glyph(s.spec.ask ? '?' : s.mood)}
-                <Button key={`v:${s.at}`} label={cutWords(s.title, room(16))} onPress={show(s.at)} />
+                <Button key={`v:${s.at}`} label={cutWords(s.title, room(20)) + version(saved, s)} onPress={show(s.at)} />
                 <Text dimColor>{`  ${ago(now - s.at)}`}</Text>
                 {s.stuck !== undefined ? <Text color="success" dimColor> · unblocked</Text> : ''}
                 {s.at > seen ? <Text color="claude"> ●</Text> : ''}
@@ -583,7 +608,7 @@ function pick<T extends string>(v: unknown, allowed: readonly T[], fallback: T):
 const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).at(-1) ?? ''
 const quoted = (q: unknown) => `“${cut(String(q ?? ''), 32)}”`
 
-// seen: when you last typed. turns: one per main-loop turn, for the ribbon. cuts: the compactions.
+// seen: when you last typed. turns: one per main-loop turn, for the return card. cuts: the compactions.
 type Held = { cache: { id: string; saved: Saved[]; seen: number; turns: Turn[]; cuts: Checkpoint[] } | null }
 
 /** This session's history, kept in `held` so the band, redrawn on every tool call, skips the store. */
@@ -740,10 +765,43 @@ async function returning($: EngineInterface, hist: NonNullable<Held['cache']>, l
     if (!busy) return []
     root ??= String((await $.session.root()) ?? '')
     const next = ask ? undefined : lead.spec.soWhat
-    return card({ now, seen: hist.seen, saved: hist.saved, turns: hist.turns, cuts: hist.cuts.map(c => c.at), agentsDone, next, root }, room, rows)
+    return card({ now, seen: hist.seen, saved: hist.saved, turns: hist.turns, agentsDone, next, root }, room, rows)
   } catch {
     return []
   }
+}
+
+/** The versions of a living visual, oldest first; [] for one without an id. */
+export function versions(saved: Saved[], id: string | undefined): Saved[] {
+  return id ? saved.filter(s => s.spec.opts.id === id) : []
+}
+
+const sameSpec = (a: Spec, b: Spec) => JSON.stringify(a) === JSON.stringify(b)
+
+/** A transcript visual's place among its versions: the saved one it is (or, still streaming, the next), compared with the one before. */
+export function inTranscript(saved: Saved[], spec: Spec): Living | undefined {
+  const all = versions(saved, spec.opts.id)
+  if (all.length === 0) return undefined
+  const k = all.findLastIndex(v => sameSpec(v.spec, spec))
+  const n = k === -1 ? all.length : k // index this version has, or will have once saved
+  const prev = all[n - 1]
+  return { version: n + 1, ...(prev ? { base: { version: n, spec: prev.spec } } : {}) }
+}
+
+/** A living visual in /catchup, compared with the version you last saw before typing (else the one before it). */
+export function sinceSeen(saved: Saved[], s: Saved, seen: number): Living | undefined {
+  const all = versions(saved, s.spec.opts.id)
+  const n = all.indexOf(s)
+  if (n === -1) return undefined
+  const k = all.findLastIndex(v => v.at <= seen && v !== s)
+  const base = k !== -1 && k < n ? k : n - 1
+  return { version: n + 1, ...(base >= 0 ? { base: { version: base + 1, spec: all[base].spec } } : {}) }
+}
+
+/** ` · v4` for a living visual past its first version, else ''. */
+const version = (saved: Saved[], s: Saved) => {
+  const n = versions(saved, s.spec.opts.id).indexOf(s) + 1
+  return n > 1 ? ` · v${n}` : ''
 }
 
 /** Where the latest goal stands: its latest status visual (flow, path, tree) when that is red, else the latest
@@ -819,6 +877,35 @@ async function agentRows($: EngineInterface, now: number) {
       })
       .sort((a, b) => Number(b.live) - Number(a.live) || (b.at ?? 0) - (a.at ?? 0))
       .slice(0, 6)
+  } catch {
+    return []
+  }
+}
+
+/** Publishes this session's edits (and its goal, so others can name it) for other sessions' radars. */
+async function shareEdits($: EngineInterface, mine: Edits, withGoal: boolean, at: number) {
+  try {
+    const id = await $.session.id()
+    for (const [f, t] of Object.entries(mine)) if (at - t > DAY) delete mine[f]
+    const goal = withGoal ? ((await $.state.get(NOW)).value?.goal ?? undefined) : undefined
+    await $.store.set(`e:${id}`, { at, ...(goal ? { goal } : {}), files: mine })
+    $.ui.invalidate('ui.render')
+  } catch {}
+}
+
+/** Other sessions' edits from the last CLASH_WINDOW, each named by its goal, else its folder. */
+async function peersOf($: EngineInterface, id: string, now: number): Promise<Peer[]> {
+  try {
+    const out: Peer[] = []
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith('e:') || key === `e:${id}`) continue
+      const rec = (await $.store.get(key)) as { at?: number; goal?: string; files?: Edits } | undefined
+      if (!rec?.files || typeof rec.at !== 'number' || now - rec.at > CLASH_WINDOW) continue
+      const sid = key.slice(2)
+      const dir = String((await $.store.get(`d:${sid}`)) ?? '')
+      out.push({ id: sid, label: rec.goal || dir || 'another session', files: rec.files })
+    }
+    return out
   } catch {
     return []
   }

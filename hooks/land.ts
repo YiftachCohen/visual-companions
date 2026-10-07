@@ -1,5 +1,5 @@
-// The session at a glance, for someone coming back: the ribbon (one bar per turn), the
-// return card (what happened since you last typed) and the compaction checkpoint.
+// The session at a glance, for someone coming back: the return card (what happened since you last typed),
+// the compaction checkpoint, agent lanes, the thrash alarm and the collision radar.
 // Pure, like render.ts: the band, /catchup and the tests share it. No model tokens.
 
 import { cut, cutWords, w } from './render'
@@ -29,16 +29,9 @@ export function span(ms: number) {
 /** `112k`, `950`. */
 export const tokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n))
 
-// ── ribbon ───────────────────────────────────────────────────────────────
+// ── shared ──────────────────────────────────────────────────────────────
 
-// No bar lower than ▂: the one-eighth block reads as an underline in many fonts.
-const LEVELS = '▂▃▄▅▆▇█'
-const CUT = '╎' // a compaction, between the turns it fell between
-const BAR_TONE: Record<string, Tone> = { '✓': 'ok', '✗': 'bad' } // only a turn that landed green or red is coloured
-/** Below this many turns a ribbon says nothing a glance at the transcript doesn't. */
-export const RIBBON_MIN = 8
-
-/** Joins neighbouring segments of one tone, so a ribbon is a few segments, not one per cell. */
+/** Joins neighbouring segments of one tone, so a line is a few segments, not one per cell. */
 function joined(segs: Seg[]): Line {
   const out: Line = []
   for (const s of segs) {
@@ -47,74 +40,6 @@ function joined(segs: Seg[]): Line {
     else out.push({ ...s })
   }
   return out
-}
-
-/**
- * The session in `room` cells: one cell per turn, as tall as its tool calls (square-root
- * scaled, so one long turn doesn't flatten the rest), green or red when its visual landed
- * that way; turns from before you last typed are dim. A `╎` marks each compaction. Under
- * it, when the work spans two goals or more, each stretch is named where the name fits.
- * The oldest turns give way first.
- */
-export function ribbon(turns: Turn[], room: number, now: number, seen = -Infinity, cuts: number[] = []): Line[] {
-  if (turns.length === 0) return []
-  const avail = room - 4 - 4 // `59m ` on the left, ` now` on the right
-  if (avail < 4) return []
-  const before = (i: number) => cuts.filter(c => (i === 0 ? -Infinity : turns[i - 1].at) < c && c <= turns[i].at).length
-  const after = cuts.filter(c => c > turns[turns.length - 1].at).length
-  let first = Math.max(0, turns.length - avail)
-  const width = (from: number) => turns.length - from + after + turns.slice(from).reduce((n, _, j) => n + (j === 0 ? 0 : before(from + j)), 0)
-  while (first < turns.length - 1 && width(first) > avail) first++
-  const shown = turns.slice(first)
-  const top = Math.max(1, ...shown.map(t => t.tools))
-
-  const bars: Seg[] = []
-  const starts: number[] = [] // the cell each shown turn starts at, for the chapter names
-  let col = 0
-  shown.forEach((t, j) => {
-    const marks = j === 0 ? 0 : before(first + j)
-    if (marks) { bars.push({ t: CUT.repeat(marks), tone: 'data' }); col += marks }
-    starts.push(col)
-    bars.push({ t: LEVELS[Math.round(Math.sqrt(Math.max(0, t.tools) / top) * (LEVELS.length - 1))], tone: BAR_TONE[t.mood ?? ''] ?? (t.at <= seen ? 'dim' : undefined) })
-    col += 1
-  })
-  if (after) bars.push({ t: CUT.repeat(after), tone: 'data' })
-  const label = span(now - shown[0].at).padStart(3) + ' '
-  const out: Line[] = [joined([{ t: label, tone: 'dim' }, ...bars, { t: ' now', tone: 'dim' }])]
-
-  // Chapters: runs of one goal, each named with as many whole words as fit.
-  const names: Seg[] = []
-  let at = 0
-  let odd = false
-  for (let j = 0; j < shown.length; ) {
-    let e = j
-    while (e + 1 < shown.length && shown[e + 1].goal === shown[j].goal) e++
-    const goal = shown[j].goal
-    const end = e + 1 < shown.length ? starts[e + 1] : col
-    const fit = end - starts[j] - 1
-    const name = goal ? wholeWords(goal, fit) : ''
-    if (name) {
-      names.push({ t: ' '.repeat(starts[j] - at) })
-      names.push({ t: name, tone: odd ? 'dim' : undefined })
-      at = starts[j] + w(name)
-      odd = !odd
-    }
-    j = e + 1
-  }
-  if (new Set(shown.map(t => t.goal).filter(Boolean)).size >= 2 && names.some(s => s.t.trim())) out.push(joined([{ t: ' '.repeat(w(label)) }, ...names]))
-  return out
-}
-
-/** `s` in `n` cells, cut only between words (`Map auth flow` → `Map auth…`); '' when not even its first word fits. */
-function wholeWords(s: string, n: number): string {
-  if (w(s) <= n) return s
-  let out = ''
-  for (const word of s.split(/\s+/)) {
-    const next = out ? `${out} ${word}` : word
-    if (w(next) + 1 > n) break
-    out = next
-  }
-  return out ? out + '…' : ''
 }
 
 // ── return card ──────────────────────────────────────────────────────────
@@ -141,7 +66,6 @@ export type CardIn = {
   seen: number // when you last typed
   saved: Visual[]
   turns: Turn[]
-  cuts: number[] // compaction times, for the ribbon
   agentsDone: number // subagents that answered since you last typed
   next?: string // the lead visual's next step
   root?: string
@@ -149,8 +73,8 @@ export type CardIn = {
 
 /**
  * The lines the band grows by when you've been away: how long and how much work, each
- * visual since as its glyph, the next step, where the edits landed, and the ribbon.
- * At most `rows` lines; the ribbon gives way first, then the glyphs, then the files.
+ * visual since as its glyph, the next step, and where the edits landed.
+ * At most `rows` lines; the glyphs give way first, then the files.
  */
 export function card(i: CardIn, room: number, rows: number): Line[] {
   const turns = i.turns.filter(t => t.at > i.seen)
@@ -174,7 +98,6 @@ export function card(i: CardIn, room: number, rows: number): Line[] {
   }
   if (i.next) out.push({ line: [{ t: '→ ', tone: 'dim' }, { t: cutWords(i.next, room - 2) }], rank: 1 })
   if (files.length) out.push({ line: [{ t: '✎ ', tone: 'data' }, { t: cut(place(files, i.root), room - 2) }], rank: 2 })
-  if (i.turns.length >= RIBBON_MIN) ribbon(i.turns, room, i.now, i.seen, i.cuts).forEach((line, k) => out.push({ line, rank: 4 + k }))
   const keep = out.map(o => o.rank).sort((a, b) => a - b).slice(0, Math.max(0, rows))
   const cutoff = keep.length ? keep[keep.length - 1] : -1
   return out.filter(o => o.rank <= cutoff).map(o => o.line)
@@ -299,4 +222,52 @@ export function spinning(fails: Map<string, number[]>, edits: Map<string, number
   }
   const took = span(now - worst.times[0])
   return [`⟳ “${cut(worst.cmd, 32)}” failed ${worst.times.length}× in a row · ${took}`, file ? `${file.name} edited ${file.n}×` : ''].filter(Boolean).join(' · ')
+}
+
+// ── collision radar ──────────────────────────────────────────────────────
+
+/** When each file was last edited, by absolute path. */
+export type Edits = Record<string, number>
+/** Another session's edits, named by its goal (or its folder) so the warning can say who. */
+export type Peer = { id: string; label: string; files: Edits }
+
+export const CLASH_WINDOW = 30 * 60_000 // both sides edited within this
+const AGENT_WINDOW = 10 * 60_000 // two of this session's own agents on one file within this
+
+/**
+ * Files this session edited that another session also edited, both within CLASH_WINDOW,
+ * the most recent other edit first. Paths are absolute, so separate worktrees never clash.
+ */
+export function collisions(mine: Edits, peers: Peer[], now: number): Array<{ file: string; who: string; at: number }> {
+  const out: Array<{ file: string; who: string; at: number }> = []
+  for (const [file, at] of Object.entries(mine)) {
+    if (now - at > CLASH_WINDOW) continue
+    for (const p of peers) {
+      const theirs = p.files[file]
+      if (theirs !== undefined && now - theirs <= CLASH_WINDOW) out.push({ file, who: p.label, at: theirs })
+    }
+  }
+  return out.sort((a, b) => b.at - a.at)
+}
+
+/** Files two or more of this session's loops (the main one, its agents) edited within AGENT_WINDOW of now. */
+export function crowded(editors: Map<string, Map<string, number>>, now: number): Array<{ file: string; n: number }> {
+  const out: Array<{ file: string; n: number }> = []
+  for (const [file, by] of editors) {
+    const n = [...by.values()].filter(t => now - t <= AGENT_WINDOW).length
+    if (n >= 2) out.push({ file, n })
+  }
+  return out
+}
+
+/** The radar's line for the band, or undefined: `⚠ register.tsx is also being edited in “Fix login redirect” · 3m ago · +1 more`. */
+export function clashText(found: Array<{ file: string; who: string; at: number }>, own: Array<{ file: string; n: number }>, now: number): string | undefined {
+  const lead = found[0]
+    ? `⚠ ${base(found[0].file)} is also being edited in “${cut(found[0].who, 28)}” · ${now - found[0].at < 30_000 ? 'just now' : `${span(now - found[0].at)} ago`}`
+    : own[0]
+      ? `⚠ ${base(own[0].file)} is being edited by ${own[0].n} agents at once`
+      : undefined
+  if (!lead) return undefined
+  const more = new Set([...found.map(f => f.file), ...own.map(o => o.file)]).size - 1
+  return more > 0 ? `${lead} · +${more} more` : lead
 }

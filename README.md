@@ -4,7 +4,7 @@ A Claude Code plugin that adds a small visual to replies that report a result, a
 
 The agent opens such a reply with a short ` ```viz ` block. The plugin draws that block as a framed terminal visual above the prose. A line above the prompt shows what the work is for and where it landed, so you can see the state of a session at a glance when you switch back to it. It leads with any question the agent is waiting on you to answer, and says when another session is waiting on you.
 
-When 10 minutes or more have passed since you last typed and work happened since, the line grows into a return card. The card says how long it has been, how long the agent worked, how many tool calls it made and how many agents finished. It also shows each visual since then as its glyph, the next step, which files were edited, and the ribbon:
+When 10 minutes or more have passed since you last typed and work happened since, the line grows into a return card. The card says how long it has been, how long the agent worked, how many tool calls it made and how many agents finished. It also shows each visual since then as its glyph, the next step, and which files were edited:
 
 ```
 Fix token refresh → Refresh race fixed, tests green  12m ago
@@ -12,17 +12,15 @@ Fix token refresh → Refresh race fixed, tests green  12m ago
 ✓ ✗ ✓ ✓  since then
 → Need a batching decision first.
 ✎ 3 files in hooks/auth/
- 2h ▃▃▄▄▆▆██▇▇▅▅▄▄▃▃▄▄▇▇▇▇╎██▆▆▄▄▅▅▇▇██▆▆▄▄▃▃▅▅ now
-    Map the…    Hunt the…    Fix and…    Write docs
 ```
 
 While the agent works, the band watches for it going in circles. When one shell command fails three times in a row within 15 minutes, with no success in between, the band leads with `⟳ “npm test” failed 4× in a row · 9m`. It also names the file edited most in that time when it was edited five times or more. Boo turns amber and stops moving. The next success of that command clears it. Heavy editing alone never raises it. A command piped into another (`npm test | tail`) reports the last command's exit code, so its failures may not count.
 
-The ribbon is the session on one line: one bar per turn. A bar's height is the number of tool calls in that turn, its agents' calls included. Its colour is the outcome of the visual the turn drew. Turns from before you last typed are dim, and `╎` marks a compaction. Each stretch of work on one goal is named under its bars. When rows are short, the ribbon gives way first.
+The band also warns when two sessions edit the same file. If another session edited a file this session edited, both within 30 minutes, the band shows `⚠ register.tsx is also being edited in “Fix login redirect” · 3m ago`, naming the other session by its goal. It warns the same way when two of this session's own agents edit one file within 10 minutes. While the agent works, the warning takes the step's place; when idle, it sits under the band line in amber. Each session shares when it last edited each file in the plugin's store, so files are compared by full path and separate worktrees never clash.
 
-Before a compaction, the plugin asks the summary to keep what the visuals recorded: decisions (★), each goal's open blocker, and questions you haven't answered. Afterwards it leaves a dim line in the transcript (`⟲ Compacted · 112k → 18k tokens · asked to keep 2 decisions, 1 blocker · /catchup`), a `╎` in the ribbon, and a row in `/catchup` that opens as a card.
+Before a compaction, the plugin asks the summary to keep what the visuals recorded: decisions (★), each goal's open blocker, and questions you haven't answered. Afterwards it leaves a dim line in the transcript (`⟲ Compacted · 112k → 18k tokens · asked to keep 2 decisions, 1 blocker · /catchup`) and a row in `/catchup` that opens as a card.
 
-`/catchup` gives the lay of the land in one pane, under the ribbon:
+`/catchup` gives the lay of the land in one pane:
 
 - **Needs you**: questions the agent asked since you last typed.
 - **Goals**: each piece of work in the session, where it stands, and its latest headline. An open blocker belongs to its goal and clears when a newer status visual for that goal isn't red.
@@ -56,7 +54,7 @@ Before a compaction, the plugin asks the summary to keep what the visuals record
 
 ## Cost
 
-The plugin adds a ~200-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card, the ribbon and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
+The plugin adds a ~230-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
 
 ## Forms
 
@@ -87,6 +85,28 @@ In `flow`, `path` and `tree`, item marks are `+` done, `*` active, `x` blocked, 
 ```
 
 A fence whose first word is not a known form is left as a normal code block.
+
+### Living visuals
+
+A visual with `@ id=<name>` is one the agent keeps updating as the work moves: a plan, a hypothesis tree, a board. Each redraw with the same id is a new version. The title shows the version, and a list under the body says what changed since the previous one. Rows are matched by label, or by most of their words when the agent rewords one, so rewording doesn't show as a row removed and another added.
+
+```
+╭─ Safari login failure  v4
+│
+│  ✓ Cookie dropped
+│  ╰─ ✓ ITP blocks cross-site API domain
+│  ⊘ CORS preflight fails ·········· no preflight sent
+│  ⊘ Storage write fails
+│
+│  ↻ since v3: 3 changed
+│  ○ → ✓  Cookie dropped
+│  ◉ → ✓  ITP blocks cross-site API domain · confirmed
+│  ○ → ⊘  Storage write fails · not needed once toggle fixed it
+│
+╰─→ Next: find out whether it blocks the auth domain
+```
+
+`/catchup` lists a living visual once, by its latest version, and opens it against the version you last saw before you typed, so the list is what you missed.
 
 ## Configuration
 

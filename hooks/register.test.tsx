@@ -2,10 +2,10 @@ import { expect, test } from 'claude-code/testing'
 
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
 import { small, smallCells } from './boo-small'
-import { change, cutWords, draw, mood, parse, plain, split, w } from './render'
-import { card, checkpointCard, keepInstructions, lanes, noticeText, place, ribbon, spinning } from './land'
+import { change, changes, cutWords, draw, mood, parse, plain, split, w } from './render'
+import { card, checkpointCard, clashText, collisions, crowded, keepInstructions, lanes, noticeText, place, spinning } from './land'
 import type { Checkpoint } from './land'
-import { byGoal, goalOf, goalReply, headline, keepOf, outcome, skillGoal, stepOf, waiting } from './register'
+import { byGoal, goalOf, goalReply, headline, inTranscript, keepOf, outcome, sinceSeen, skillGoal, stepOf, waiting } from './register'
 
 const FLOW = `flow Release is blocked at the migrate step
 + build
@@ -755,42 +755,11 @@ test("Haiku reads how the agent's last reply ended, so a yes to a proposal names
   expect(state.goal).toBe('Live test the plugin')
 })
 
-// The session at a glance: ribbon, return card, compaction checkpoint.
+// The session at a glance: return card, compaction checkpoint.
 
 const MIN = 60_000
 const turn = (at: number, tools: number, extra: Record<string, unknown> = {}) => ({ at, tools, ms: MIN, ...extra })
 const text = (lines: Array<Array<{ t: string }>>) => lines.map(l => l.map(s => s.t).join('')).join('\n')
-
-test('the ribbon is one bar per turn, as tall as its work, coloured by its outcome', async () => {
-  const turns = [turn(0, 2, { goal: 'Map' }), turn(MIN, 40, { goal: 'Map', mood: '✓' }), turn(2 * MIN, 10, { goal: 'Fix race', mood: '✗' }), turn(3 * MIN, 0, { goal: 'Fix race' })]
-  const [bars] = ribbon(turns, 60, 4 * MIN, 1.5 * MIN)
-  // One cell per turn, never lower than ▂ (the one-eighth block reads as an underline).
-  expect(text([bars])).toBe(' 4m ▃█▅▂ now')
-  // Only green and red outcomes colour a bar; turns from before you last typed are dim, later ones plain.
-  expect(bars.find(s => s.t === '█')?.tone).toBe('ok')
-  expect(bars.find(s => s.t === '▅')?.tone).toBe('bad')
-  expect(bars.find(s => s.t.includes('▃'))?.tone).toBe('dim')
-  expect(bars.find(s => s.t === '▂')?.tone).toBe(undefined)
-  expect(ribbon([turn(0, 3, { mood: '★' }), turn(MIN, 3, { mood: '◉' })], 40, 2 * MIN)[0].some(s => s.tone === 'pick' || s.tone === 'warn')).toBe(false)
-  // Two goals or more: each stretch is named under it where the name fits.
-  const long = [...Array.from({ length: 9 }, (_, i) => turn(i * MIN, 3, { goal: 'Map auth' })), ...Array.from({ length: 7 }, (_, i) => turn((9 + i) * MIN, 3, { goal: 'Fix the race' }))]
-  // Names are cut between words only.
-  expect(text([ribbon(long, 60, 16 * MIN)[1]])).toBe('    Map auth Fix…')
-  // One goal throughout: no names, they would only repeat it.
-  expect(ribbon(long.map(t => ({ ...t, goal: 'Map auth' })), 60, 16 * MIN).length).toBe(1)
-})
-
-test('the ribbon marks compactions and lets the oldest turns go when it runs out of room', async () => {
-  const turns = Array.from({ length: 100 }, (_, i) => turn(i * MIN, i % 7))
-  const [bars] = ribbon(turns, 40, 100 * MIN, Infinity, [90.5 * MIN])
-  const t = text([bars])
-  expect(t.length).toBeLessThan(41)
-  expect(t).toContain('╎')
-  expect(t.endsWith(' now')).toBe(true)
-  // The left label is how long ago the first bar shown was, not the session's start.
-  expect(t.startsWith('100m')).toBe(false)
-  expect(ribbon([], 40, 0)).toEqual([])
-})
 
 test('edited files read as names, or as a count and the folder they share', async () => {
   expect(place(['/r/hooks/render.ts', '/r/hooks/render.ts', '/r/hooks/boo.ts'], '/r')).toBe('render.ts, boo.ts')
@@ -800,23 +769,19 @@ test('edited files read as names, or as a count and the folder they share', asyn
 
 test('the return card says how long, how much work, what came in, what is next and where the edits landed', async () => {
   const saved = [at(1 * MIN, FLOW), at(30 * MIN, 'flow Cache warmed\n+ a'), at(40 * MIN, 'flow Fixed\n+ a')]
-  const early = Array.from({ length: 6 }, (_, k) => turn(k * 10_000, 2))
-  const turns = [...early, turn(MIN, 5), turn(30 * MIN, 12, { mood: '✓', files: ['/r/hooks/a.ts'] }), turn(40 * MIN, 30, { mood: '✓', files: ['/r/hooks/b.ts', '/r/hooks/c.ts'] })]
-  const i = { now: 47 * MIN, seen: 5 * MIN, saved, turns, cuts: [], agentsDone: 2, next: 'Ship it after review.', root: '/r' }
+  const turns = [turn(MIN, 5), turn(30 * MIN, 12, { mood: '✓', files: ['/r/hooks/a.ts'] }), turn(40 * MIN, 30, { mood: '✓', files: ['/r/hooks/b.ts', '/r/hooks/c.ts'] })]
+  const i = { now: 47 * MIN, seen: 5 * MIN, saved, turns, agentsDone: 2, next: 'Ship it after review.', root: '/r' }
   const all = text(card(i, 80, 10))
   expect(all).toContain('42m since you typed · worked 2m · 42 tool calls · 2 agents finished')
   expect(all).toContain('✓ ✓  since then')
   expect(all).toContain('→ Ship it after review.')
   expect(all).toContain('✎ 3 files in hooks/')
-  expect(all).toMatch(/now$/m)
-  // Short of rows, the ribbon gives way first, then the glyphs; the facts and the next step stay.
+  // Short of rows, the glyphs give way first, then the files; the facts and the next step stay.
   const two = text(card(i, 80, 2))
   expect(two.split('\n').length).toBe(2)
   expect(two).toContain('since you typed')
   expect(two).toContain('→ Ship it')
   expect(card(i, 80, 0)).toEqual([])
-  // Under eight turns there is no ribbon.
-  expect(text(card({ ...i, turns: turns.slice(-3) }, 80, 10))).not.toMatch(/now$/m)
 })
 
 function away($: any, on: any, seen: number) {
@@ -857,7 +822,7 @@ test('the return card fits the rows the band is given, and waits while the model
   expect(await busy.find({ type: 'Text', text: /since you typed/ })).toBe(undefined)
 })
 
-test("each turn is kept for the ribbon: its tool calls, agents' included, the files it edited, its visual", async ($, on) => {
+test("each turn is kept for the return card: its tool calls, agents' included, the files it edited, its visual", async ($, on) => {
   const store = new Map<string, unknown>()
   on('session.id', () => ({ value: 's1' }))
   on('clock.now', () => ({ value: 500 }))
@@ -950,18 +915,14 @@ test("a precompute or a subagent's compaction leaves no checkpoint", async ($, o
 
 const CUT: Checkpoint = { at: 9_000, trigger: 'auto', before: 120_000, after: 20_000, kept: { decisions: ['Self-host'], blockers: [], asks: [] }, notice: '⟲ Compacted · 120k → 20k tokens · asked to keep 1 decision · /catchup' }
 
-test('/catchup opens with the ribbon and lists compactions among the visuals', async ($, on) => {
+test('/catchup lists compactions among the visuals', async ($, on) => {
   const hist = [at(1_000, FLOW, 'Migrate users'), at(20_000, 'flow Fixed\n+ a', 'Migrate users')]
-  const turns = [...Array.from({ length: 6 }, (_, k) => turn(100 + k, 1)), turn(1_000, 4, { mood: '✗', goal: 'Migrate users' }), turn(5_000, 9, { goal: 'Migrate users' }), turn(20_000, 2, { mood: '✓', goal: 'Migrate users' })]
   on('session.id', () => ({ value: 's1' }))
   on('clock.now', () => ({ value: 30_000 }))
   on('clock.after', () => ({ deny: 'no timers in this test' }))
   on('store.keys', () => ({ value: ['h:s1'] }))
-  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': hist, 'p:s1': 25_000, 't:s1': turns, 'c:s1': [CUT] } as any)[e.key] }))
+  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': hist, 'p:s1': 25_000, 'c:s1': [CUT] } as any)[e.key] }))
   const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
-  expect(await ui.find({ type: 'Text', text: /9 turns/ })).not.toBe(undefined)
-  expect(await ui.find({ type: 'Text', text: /╎/ })).not.toBe(undefined)
-  expect(await ui.find({ type: 'Text', text: / now$/ })).not.toBe(undefined)
   expect(await ui.find({ type: 'Button', text: /^Compacted · 120k → 20k tokens · 1 kept$/ })).not.toBe(undefined)
   await ui.press({ key: `c:${CUT.at}` })
   expect(await ui.find({ type: 'Text', text: /Compacted · asked the summary to keep 1/ })).not.toBe(undefined)
@@ -1075,4 +1036,151 @@ test('/catchup draws the agents as lanes once their start is known', async ($, o
   expect(await ui.find({ type: 'Text', text: /8m ago +now/ })).not.toBe(undefined)
   expect(await ui.find({ type: 'Text', text: /explore-auth +━+✓ +Found 3 entry points/ })).not.toBe(undefined)
   expect(await ui.find({ type: 'Text', text: /planner +━+◉ +Editing plan\.md/ })).not.toBe(undefined)
+})
+
+// The collision radar.
+
+test('a clash is a file both sessions edited within 30 minutes, named by the other session', async () => {
+  const now = 60 * MIN
+  const mine = { '/r/hooks/register.tsx': now - 2 * MIN, '/r/README.md': now - 50 * MIN, '/r/hooks/land.ts': now - MIN }
+  const peers: Array<{ id: string; label: string; files: Record<string, number> }> = [
+    { id: 's2', label: 'Fix login redirect', files: { '/r/hooks/register.tsx': now - 3 * MIN, '/r/README.md': now - MIN } },
+    // Another worktree's copy of the file is a different path: no clash.
+    { id: 's3', label: 'Docs', files: { '/wt/hooks/land.ts': now - MIN } },
+  ]
+  const found = collisions(mine, peers, now)
+  // My README edit is older than the window: no clash there.
+  expect(found).toEqual([{ file: '/r/hooks/register.tsx', who: 'Fix login redirect', at: now - 3 * MIN }])
+  expect(clashText(found, [], now)).toBe('⚠ register.tsx is also being edited in “Fix login redirect” · 3m ago')
+  // Two of this session's own agents on one file.
+  const editors = new Map([['/r/a.ts', new Map([['main', now - MIN], ['ag1', now - 2 * MIN]])], ['/r/b.ts', new Map([['main', now - MIN]])]])
+  expect(crowded(editors, now)).toEqual([{ file: '/r/a.ts', n: 2 }])
+  expect(clashText([], crowded(editors, now), now)).toBe('⚠ a.ts is being edited by 2 agents at once')
+  expect(clashText(found, crowded(editors, now), now)).toMatch(/· \+1 more$/)
+  expect(clashText([], [], now)).toBe(undefined)
+})
+
+function radar($: any, on: any, store: Map<string, unknown>) {
+  const spec = parse(FLOW)!
+  store.set('h:s1', [{ at: 0, title: spec.title, mood: '✗', spec }])
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 10 * MIN }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.get', (_: unknown, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_: unknown, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('state.get', () => ({ value: { value: { goal: 'Add collision radar' }, version: 1 } }))
+  on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`the band warns when another session edits a file this one edited (${surface})`, async ($, on) => {
+    const store = new Map<string, unknown>([['e:s2', { at: 7 * MIN, goal: 'Fix login redirect', files: { '/r/hooks/register.tsx': 7 * MIN } }]])
+    radar($, on, store)
+    const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120 } as any
+    let ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+    // No edit of mine yet: nothing to clash with.
+    expect(await ui.find({ type: 'Text', text: /⚠/ })).toBe(undefined)
+    await $.tool.call({ tool: 'Edit', file_path: '/r/hooks/register.tsx', old_string: 'a', new_string: 'b' } as any).catch(() => {})
+    await new Promise(r => (globalThis as any).setTimeout(r, 10))
+    // This session's edits are shared, under its goal, for the other session's radar.
+    expect(store.get('e:s1')).toEqual({ at: 10 * MIN, goal: 'Add collision radar', files: { '/r/hooks/register.tsx': 10 * MIN } })
+    ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+    expect(await ui.find({ type: 'Text', text: /⚠ register\.tsx is also being edited in “Fix login redirect” · 3m ago/ })).not.toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /Release is blocked/ })).not.toBe(undefined)
+    // While working it takes the step's place.
+    ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props: { ...props, isWorking: true } })
+    expect(await ui.find({ type: 'Text', text: /⚠ register\.tsx is also being edited/ })).not.toBe(undefined)
+  })
+}
+
+test('the band warns when two agents of this session edit one file', async ($, on) => {
+  radar($, on, new Map())
+  await $.tool.call({ tool: 'Edit', file_path: '/r/a.ts', old_string: 'a', new_string: 'b' } as any).catch(() => {})
+  await $.tool.call({ tool: 'Write', file_path: '/r/a.ts', content: 'x', agentId: 'ag1' } as any).catch(() => {})
+  await new Promise(r => (globalThis as any).setTimeout(r, 10))
+  const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120 } as any
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'desktop', component: 'AbovePrompt', props })
+  expect(await ui.find({ type: 'Text', text: /⚠ a\.ts is being edited by 2 agents at once/ })).not.toBe(undefined)
+})
+
+// Living visuals.
+
+const V1 = 'tree Safari login failure\n@ id=safari\n* cookie SameSite\n. CORS preflight\n. clock skew | check NTP'
+const V2 = 'tree Safari login failure · 1 ruled out\n@ id=safari\n- cookie SameSite | headers fine\n* CORS preflight\n. clock skew | <1s'
+const V3 = 'tree Safari login failure · 2 ruled out\n@ id=safari\n- cookie SameSite | headers fine\n- CORS preflight | not sent\n* ITP partitioning | reproduces in private mode'
+
+test('a living visual lists what changed since an earlier version: new, status, value or note, removed', async () => {
+  // One entry per row: a status change carries its new note.
+  expect(changes(parse(V1)!, parse(V2)!)).toEqual([
+    { kind: 'status', label: 'cookie SameSite', from: 'active', to: 'dropped', note: 'headers fine' },
+    { kind: 'status', label: 'CORS preflight', from: 'todo', to: 'active' },
+    { kind: 'note', label: 'clock skew', from: 'check NTP', to: '<1s' },
+  ])
+  const c = changes(parse(V2)!, parse(V3)!)
+  expect(c.find(x => x.kind === 'new')).toEqual({ kind: 'new', label: 'ITP partitioning' })
+  expect(c.at(-1)).toEqual({ kind: 'removed', label: 'clock skew' })
+  // A reworded row is the same row: its status change shows, not a row removed and another added.
+  expect(changes(parse('tree H\n@ id=h\n* CORS preflight rejects a credentialed request\n. clock skew')!, parse('tree H\n@ id=h\n- CORS preflight | no OPTIONS sent\n  . clock skew')!))
+    .toEqual([{ kind: 'status', label: 'CORS preflight', from: 'active', to: 'dropped', note: 'no OPTIONS sent' }])
+  // Unrelated rows stay new and removed.
+  expect(changes(parse('tree H\n@ id=h\n* cookie SameSite')!, parse('tree H\n@ id=h\n* storage write fails')!).map(c => c.kind)).toEqual(['new', 'removed'])
+  // Chart rows are matched by their label; a new value is a change of value.
+  expect(changes(parse('bars B\n@ id=b\nrecall: 0.91\nlatency: 180ms')!, parse('bars B\n@ id=b\nrecall: 0.95 *\nlatency: 180ms')!))
+    .toEqual([{ kind: 'value', label: 'recall', from: '0.91', to: '0.95 *' }])
+})
+
+test('a living visual draws its version and the changes under the body', async () => {
+  const out = plain(draw(parse(V3)!, 72, { version: 3, base: { version: 2, spec: parse(V2)! } }))
+  expect(out.split('\n')[0]).toMatch(/Safari login failure · 2 ruled out  v3$/)
+  expect(out).toContain('↻ since v2: 1 new · 1 changed · 1 removed')
+  expect(out).toContain('◉ → ⊘  CORS preflight · not sent')
+  expect(out).toContain('+ ITP partitioning')
+  expect(out).toContain('− clock skew')
+  expect(plain(draw(parse(V3)!, 72, { version: 2, base: { version: 1, spec: parse(V3)! } }))).toContain('↻ no change since v1')
+  // A first version, or a visual without an id, draws as before.
+  expect(plain(draw(parse(V1)!, 72, { version: 1 }))).toBe(plain(draw(parse(V1)!, 72)))
+})
+
+test("a transcript visual is compared with the version before it; /catchup's with the one you last saw", async () => {
+  const saved = [at(100, V1), at(200, V2), at(300, V3)]
+  // A saved version: its own place.
+  expect(inTranscript(saved, parse(V2)!)).toEqual({ version: 2, base: { version: 1, spec: parse(V1)! } })
+  // One still streaming: the next version, against the latest.
+  const next = parse(V3.replace('2 ruled out', '3 ruled out'))!
+  expect(inTranscript(saved, next)?.version).toBe(4)
+  expect(inTranscript(saved, parse(FLOW)!)).toBe(undefined)
+  // You typed after v1: v3 is compared with v1, what you missed.
+  expect(sinceSeen(saved, saved[2], 150)).toEqual({ version: 3, base: { version: 1, spec: parse(V1)! } })
+  // You typed after v3 (or before v1): with the version before it.
+  expect(sinceSeen(saved, saved[2], 400)?.base?.version).toBe(2)
+  expect(sinceSeen(saved, saved[2], 0)?.base?.version).toBe(2)
+})
+
+test('a redrawn visual in the transcript shows what changed since its last version', async ($, on) => {
+  on('session.id', () => ({ value: 's1' }))
+  on('store.get', (_, e: any) => ({ value: e.key === 'h:s1' ? [at(100, V1), at(200, V2)] : undefined }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{(e.props as { text?: string }).text ?? ''}</Text>
+  })
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'AssistantMessage', props: { text: '```viz\n' + V3 + '\n```\nNarrowed it down.', isFirstOfReply: true } as any })
+  expect(await ui.find({ type: 'Text', text: /2 ruled out  v3/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /↻ since v2/ })).not.toBe(undefined)
+})
+
+test('/catchup lists a living visual once, by its latest version, and opens it against what you last saw', async ($, on) => {
+  const hist = [at(100, V1), at(200, FLOW), at(300, V2), at(400, V3)]
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 10_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.keys', () => ({ value: ['h:s1'] }))
+  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': hist, 'p:s1': 150 } as any)[e.key] }))
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
+  // The latest leads, compared with v1, the version before you typed.
+  expect(await ui.find({ type: 'Text', text: /↻ since v1/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Button', text: /Safari login failure/ })).toBe(undefined)
+  expect(await ui.find({ type: 'Button', text: /Release is blocked/ })).not.toBe(undefined)
+  await ui.press({ key: 'v:200' })
+  expect(await ui.find({ type: 'Button', text: /^Safari login failure · 2 ruled out · v3$/ })).not.toBe(undefined)
 })
