@@ -92,23 +92,19 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'catchup', description: "Show this session's recent visual companions" })
     $.ui.status(undefined) // the headline is drawn above the prompt instead
-    // Where this session runs, so another session's /catchup can name it.
-    try { await $.store.set(`d:${await $.session.id()}`, base(await $.session.root())) } catch {}
+    // Where this session runs, so another session's /catchup can name it; `at` lets housekeeping age it out.
+    try { await $.store.set(`d:${await $.session.id()}`, { dir: base(await $.session.root()), at: await $.clock.now() }) } catch {}
     try {
       const id = await $.session.id()
       const cutoff = (await $.clock.now()) - stale
-      // A session was last active at its latest visual or turn, whichever is later.
+      // Every session that left a key, not only those with visuals: a short or headless one leaves its folder and prompt time.
       const keys = await $.store.keys()
-      const ids = new Set(keys.filter(k => /^[hte]:/.test(k)).map(k => k.slice(2)))
+      const ids = new Set(keys.filter(k => KEYS.test(k)).map(k => k.slice(2)))
       ids.delete(id)
       for (const sid of ids) {
         let last = 0
-        for (const k of ['h', 't', 'e']) {
-          if (!keys.includes(`${k}:${sid}`)) continue
-          const kept = (await $.store.get(`${k}:${sid}`)) as Array<{ at?: number }> | { at?: number } | undefined
-          last = Math.max(last, Number((Array.isArray(kept) ? kept.at(-1)?.at : kept?.at) ?? 0))
-        }
-        if (last < cutoff) for (const k of ['h', 'p', 'd', 't', 'c', 'e']) await $.store.delete(`${k}:${sid}`)
+        for (const k of SESSION_KEYS) if (keys.includes(`${k}:${sid}`)) last = Math.max(last, lastAt(await $.store.get(`${k}:${sid}`)))
+        if (last < cutoff) for (const k of SESSION_KEYS) await $.store.delete(`${k}:${sid}`)
       }
     } catch {} // housekeeping only
     return next(e)
@@ -625,8 +621,19 @@ function pick<T extends string>(v: unknown, allowed: readonly T[], fallback: T):
   return (allowed as readonly unknown[]).includes(v) ? (v as T) : fallback
 }
 
-// A session's folder as stored; anything else (an older version kept other data under `d:`) is no name.
-const dirOf = (v: unknown) => (typeof v === 'string' ? v : '')
+// A session's folder as stored: `{ dir, at }`, or a bare string before it carried a time. Anything else
+// (an older version kept other data under `d:`) is no name.
+const dirOf = (v: unknown) => (typeof v === 'string' ? v : typeof (v as { dir?: unknown })?.dir === 'string' ? (v as { dir: string }).dir : '')
+
+// Every key a session leaves, by prefix: h visuals, p when you typed, d its folder, t turns, c compactions, e edits.
+const SESSION_KEYS = ['h', 'p', 'd', 't', 'c', 'e']
+const KEYS = /^[hpdtce]:/
+
+/** When a stored value was last written: a time itself, the latest entry's `at`, or its own `at`; 0 when it says nothing. */
+export function lastAt(v: unknown): number {
+  const at = typeof v === 'number' ? v : Array.isArray(v) ? v.at(-1)?.at : (v as { at?: unknown } | undefined)?.at
+  return typeof at === 'number' && isFinite(at) ? at : 0
+}
 const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).at(-1) ?? ''
 const quoted = (q: unknown) => `“${cut(String(q ?? ''), 32)}”`
 
