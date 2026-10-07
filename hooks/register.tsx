@@ -2,6 +2,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { big, booMood } from './boo'
 import type { Companion, Look } from './boo'
+import { flockCells, flockWait, flockWidth, pupOf } from './boo-flock'
+import type { Pup } from './boo-flock'
 import { small } from './boo-small'
 import { card, checkpointCard, clashText, CLASH_WINDOW, collisions, commandKey, crowded, cutsOf, keepInstructions, lanes, noticeText, span, spinning, tokens, turnsOf } from './land'
 import type { Checkpoint, Edits, Kept, Lane, Peer, Turn } from './land'
@@ -146,7 +148,8 @@ export const register: Register = (on, options) => {
     const spin = working ? (spinning(fails, edits, now) ?? clash) : undefined
     const step = working ? (spin ?? live?.step) : undefined
     const busy = !!(head || step)
-    const n = await running($)
+    const crew = await crewOf($)
+    const n = crew.filter(a => LIVE.has(a.status)).length
     const agents = n ? `${n} agent${n === 1 ? '' : 's'} running` : ''
 
     const ask = waiting(hist.saved, hist.seen)
@@ -203,6 +206,11 @@ export const register: Register = (on, options) => {
       return 4000
     }
     let drawn = at(now - since)
+    // The flock: a pup for each agent, beside Boo; its clock runs from when this band was drawn.
+    const pups = flock(crew, now)
+    const fw = flockWidth(pups.length)
+    const flockAt = (t: number) => flockCells(pups, t, rows, look, animate)
+    let flocked = pups.length ? flockAt(0) : ''
 
     // Repaint only when the cells change; stop once the band is gone.
     const tick = async () => {
@@ -213,11 +221,17 @@ export const register: Register = (on, options) => {
         if (r.deny) return void (timer = null)
         drawn = cells
       }
-      timer = $.clock.after(until(t, cells), tick)
+      const f = (await $.clock.now()) - now
+      if (pups.length && flockAt(f) !== flocked) {
+        const r = await $.ui.blit({ requestId, key: 'flock', cells: flockAt(f) })
+        if (r.deny) return void (timer = null)
+        flocked = flockAt(f)
+      }
+      timer = $.clock.after(Math.min(until(t, cells), flockWait(pups, f, animate)), tick)
     }
-    if (animate) timer = $.clock.after(until(now - since, drawn), tick)
+    if (animate) timer = $.clock.after(Math.min(until(now - since, drawn), flockWait(pups, 0)), tick)
 
-    const room = cols - columns - 3
+    const room = cols - columns - fw - 3
     // Two rows: the goal above and the step dim below; idle, the outcome above and the goal dim below.
     const body: Seg2[][] =
       rows === 1
@@ -231,6 +245,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="row" gap={1} marginTop={1}>
         <Raster key="boo" columns={columns} rows={rows} cells={drawn} />
+        {fw > 0 && <Raster key="flock" columns={fw} rows={rows} cells={flocked} />}
         <Box flexDirection="column">
           {body.map((l, k) => (
             <Text key={String(k)} wrap="truncate-end">{segs(Text, l)}</Text>
@@ -933,13 +948,24 @@ async function otherSessions($: EngineInterface, id: string, now: number) {
   }
 }
 
-/** Subagents and teammates still at work; 0 where the list can't be read. */
-async function running($: EngineInterface): Promise<number> {
+const LIVE = new Set(['running', 'pending', 'waiting']) // still at work, for the band's count
+
+/** This session's agents with when each last answered; [] where the list can't be read. */
+async function crewOf($: EngineInterface): Promise<Array<{ status: string; end?: number }>> {
   try {
-    return (await $.agent.list()).filter(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting').length
+    const list = await $.agent.list()
+    const notes = (await $.state.get(AGENTS)).value ?? {}
+    return list.map(a => ({ status: a.status, end: (notes[a.id] as AgentNote | undefined)?.end }))
   } catch {
-    return 0
+    return []
   }
+}
+
+const PUP_ORDER: Record<string, number> = { working: 0, neutral: 1, blocked: 2, success: 3 }
+
+/** The agents as pups, working ones first; finished and failed ones only for a minute after they answered. */
+function flock(crew: Array<{ status: string; end?: number }>, now: number): Pup[] {
+  return crew.flatMap(a => { const p = pupOf(a.status, a.end, now); return p ? [p] : [] }).sort((a, b) => PUP_ORDER[a.mood] - PUP_ORDER[b.mood])
 }
 
 /** A tool call as a few words: Bash's own description, else the tool and its target. */

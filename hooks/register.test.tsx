@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
+import { flockCells, flockWidth, MAX_PUPS, pupOf } from './boo-flock'
 import { small, smallCells } from './boo-small'
 import { change, changes, coverage, cutWords, draw, mood, parse, plain, split, w } from './render'
 import { card, checkpointCard, clashText, collisions, crowded, keepInstructions, lanes, noticeText, place, spinning } from './land'
@@ -1233,4 +1234,74 @@ test('a tree says how much of it has been explored, overall in the title and per
   expect(single.find(l => l.includes('hit rate'))).not.toContain('explored')
   // Under three marked leaves there is no count.
   expect(coverage(parse('tree T\n+ a\n. b')!.items)).toBe('')
+})
+
+// Boo's flock.
+
+const unpack = (b64: string) => {
+  const bin = atob(b64)
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0))
+  return Array.from(new Uint32Array(bytes.buffer))
+}
+const codes = (b64: string) => unpack(b64).filter((_, k) => k % 3 === 0)
+
+test('each agent is a pup two cells wide; working ones flutter out of step, the rest stand still', async () => {
+  const working = { mood: 'working' as const, fade: 0 }
+  const done = { mood: 'success' as const, fade: 0.5 }
+  const one = codes(flockCells([working, done], 0))
+  expect(one.length).toBe(flockWidth(2))
+  expect(flockWidth(2)).toBe(7)
+  // Gap, pup, gap, pup, gap; every pup cell is braille.
+  expect([one[0], one[3], one[6]]).toEqual([0x20, 0x20, 0x20])
+  expect([one[1], one[2], one[4], one[5]].every(c => c >= 0x2800 && c <= 0x28ff)).toBe(true)
+  // The working pup's hem moves with time; the finished one's doesn't.
+  const later = codes(flockCells([working, done], 320))
+  expect(later.slice(1, 3)).not.toEqual(one.slice(1, 3))
+  expect(later.slice(4, 6)).toEqual(one.slice(4, 6))
+  // Held still, nothing moves.
+  expect(codes(flockCells([working], 320, 1, undefined, false))).toEqual(codes(flockCells([working], 0)))
+  // Past five pups, the rest are a count.
+  const many = codes(flockCells(Array(8).fill(working), 0))
+  expect(String.fromCharCode(...many.slice(-2))).toBe('+3')
+  expect(many.length).toBe(flockWidth(8))
+  expect(MAX_PUPS).toBe(5)
+  // Beside a two-row Boo the pups stand on the bottom row.
+  const tall = codes(flockCells([working], 0, 2))
+  expect(tall.slice(0, flockWidth(1)).every(c => c === 0x20)).toBe(true)
+})
+
+test("a pup shows an agent's state, and a finished one fades out within a minute of answering", async () => {
+  expect(pupOf('running', undefined, 0)).toEqual({ mood: 'working', fade: 0 })
+  expect(pupOf('idle', undefined, 0)?.mood).toBe('neutral')
+  expect(pupOf('completed', 0, 30_000)).toEqual({ mood: 'success', fade: 0.5 })
+  expect(pupOf('failed', 0, 1_000)?.mood).toBe('blocked')
+  expect(pupOf('completed', 0, 60_000)).toBe(undefined)
+  // No answer heard, no end to fade from: no pup.
+  expect(pupOf('completed', undefined, 0)).toBe(undefined)
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`the band draws a pup per agent beside Boo, in the terminal only (${surface})`, async ($, on) => {
+    const spec = parse(FLOW)!
+    on('session.id', () => ({ value: 's1' }))
+    on('clock.now', () => ({ value: 100_000 }))
+    on('clock.after', () => ({ deny: 'no timers in this test' }))
+    on('store.get', (_, e: any) => ({ value: e.key === 'h:s1' ? [{ at: 0, title: spec.title, mood: '✗', spec }] : undefined }))
+    on('state.get', (_, e: any) => ({ value: { value: e.key === 'agents' ? { c: { at: 90_000, end: 90_000 }, d: { at: 1_000, end: 1_000 } } : null, version: 1 } }))
+    const agent = (id: string, status: string) => ({ id, description: id, type: 'Explore', status })
+    on('agent.list', () => ({ value: [agent('a', 'running'), agent('b', 'running'), agent('c', 'completed'), agent('d', 'completed')] }) as any)
+    const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120 } as any
+    const ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+    const raster = await ui.find({ type: 'Raster', key: 'flock' })
+    if (surface === 'desktop') expect(raster).toBe(undefined)
+    // Two working, one finished 10s ago; the one that finished long ago has gone.
+    else expect(raster).not.toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /2 agents running/ })).not.toBe(undefined)
+  })
+}
+
+test('no agents, no flock', async ($, on) => {
+  const ui = await band($, on)
+  expect(await ui.find({ type: 'Raster', key: 'flock' })).toBe(undefined)
+  expect(await ui.find({ type: 'Raster', key: 'boo' })).not.toBe(undefined)
 })
