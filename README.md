@@ -54,6 +54,8 @@ Before a compaction, the plugin asks the summary to keep what the visuals record
 /plugin install visual-companions --marketplace YiftachCohen/visual-companions
 ```
 
+Updates arrive when the version changes. Claude Code doesn't auto-update third-party marketplaces unless you turn it on: open `/plugin`, go to Marketplaces, and enable auto-update for `visual-companions`. Or update by hand with `/plugin marketplace update visual-companions`.
+
 ## Cost
 
 The plugin adds a ~250-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
@@ -161,6 +163,21 @@ claude plugin test .
 ```
 
 Loading the plugin generates `.claude-plugin/types/`, which `tsconfig.json` extends. After that, `tsc -p . --noEmit` type-checks the plugin.
+
+## Changelog
+
+### 0.3.0
+
+- Return card: after 10 minutes away, the band grows into a summary of what happened since you typed.
+- Compaction checkpoint: the summary is asked to keep decisions, open blockers and unanswered questions, and the compaction is marked in the transcript and `/catchup`.
+- Agent lanes in `/catchup`, and Boo's flock in the band: a pup for each agent.
+- Thrash alarm: the band warns when one command keeps failing.
+- Collision radar: the band warns when another session or agent edits a file this session edited.
+- Living visuals (`@ id=`): a redrawn visual shows its version and what changed.
+- The `claims` form, for an evidence board.
+- Trees show how much of them has been explored.
+- `/catchup` overview: questions waiting on you, goals, agents, other sessions; `> ?` questions; `path` and `matrix` forms.
+- Goal naming no longer takes a skill the model loads as the goal, and reads the agent's last reply.
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "visual-companions",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Draws agent ```viz blocks as compact visuals, keeps the latest headline above the prompt, /catchup shows recent ones. Costs the model ~250 cached prompt tokens + ~50 per visual.",
   "author": {
     "name": "Yiftach Cohen",
