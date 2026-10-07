@@ -211,7 +211,8 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   // What the agent is on, from its own tool calls: no model tokens (only a plain prompt's goal costs a Haiku call). A skill names
-  // the goal, its task list the task in progress, any other tool the step.
+  // the goal only when nothing else has (one the model loads mid-task, like a design guide, is a means, not the goal);
+  // its task list the task in progress, any other tool the step.
   const tasks = new Map<string, { wording: string; done: boolean }>() // task id → its in-progress wording, from TaskCreate
   const counts = () => ({ done: [...tasks.values()].filter(t => t.done).length, total: tasks.size })
   on('tool.call', async ($, e, next) => {
@@ -226,7 +227,7 @@ export const register: Register = (on, options) => {
     }
     if (e.tool === 'Skill') {
       const goal = skillGoal(String(a.skill ?? ''), String(a.args ?? ''))
-      if (goal) note(() => merge($, { goal, task: undefined }))
+      if (goal) note(async () => { if (!(await $.state.get(NOW)).value?.goal) await merge($, { goal, task: undefined }) })
     } else if (e.tool === 'TodoWrite') {
       const todos = (a.todos as Array<{ status: string; activeForm?: string; content: string }> | undefined) ?? []
       const t = todos.find(t => t.status === 'in_progress')
@@ -484,13 +485,20 @@ async function merge($: EngineInterface, patch: Now) {
   } catch {}
 }
 
+// Haiku says SAME rather than repeating the goal: asked to repeat it, it kept a stale goal through new work.
 const GOAL_SYSTEM = `You label what a developer's coding session is working on, for a status line.
-Reply with the goal only: 2 to 6 words, sentence case, no trailing period, no quotes.
-Name the work, not the wording: "Fix Safari login redirect", not "User asks about redirect".
-If the new message continues or adjusts the current goal (a yes, a correction, a detail), reply with the current goal unchanged.
-If there is no current goal and the message has no clear task, reply NONE.`
+Given the current goal and the developer's new message, reply with exactly one of:
+- SAME, when the message only answers, approves, corrects or adds a detail to the current goal's work.
+- A new goal of 2 to 6 words, sentence case, no trailing period, no quotes, when the message asks for work with its own subject or reports something broken. Name the work, not the wording.
+- NONE, when there is no current goal and the message has no clear task.
+A message that picks the next piece of a larger plan is new work: name that piece.
+Examples:
+Current goal: Fix Safari login redirect / Message: yes, go ahead -> SAME
+Current goal: Fix Safari login redirect / Message: use a 302 instead -> SAME
+Current goal: Plan onboarding redesign / Message: let's build the welcome screen and the invite step first -> Build welcome screen and invite step
+Current goal: Add dark mode toggle / Message: the toggle doesn't persist after reload -> Fix dark mode persistence`
 
-/** A plain prompt's goal, named by Haiku with the current goal as context; undefined when it can't say. */
+/** A plain prompt's goal, named by Haiku with the current goal as context: the current one when it says SAME, undefined when it can't say. */
 async function nameGoal($: EngineInterface, text: string): Promise<string | undefined> {
   const plain = text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, ' ').replace(/\[(Image|Pasted text) #\d+[^\]]*\]/g, '[attachment]').replace(/\s+/g, ' ').trim()
   if (!plain || plain === '[attachment]') return undefined
@@ -505,11 +513,18 @@ async function nameGoal($: EngineInterface, text: string): Promise<string | unde
       timeoutMs: 8000,
     })
     if (!r.isAnswered) return undefined
-    const g = r.text.trim().split('\n')[0].replace(/^["'`]+|["'`.]+$/g, '').trim()
-    return g && g !== 'NONE' ? cutWords(g, 48) : undefined
+    return goalReply(r.text, cur)
   } catch {
     return undefined
   }
+}
+
+/** Haiku's reply as a goal: SAME keeps `cur`; NONE, a question or a sentence is no goal. */
+export function goalReply(text: string, cur: string | undefined): string | undefined {
+  const g = text.trim().split('\n')[0].replace(/^["'`]+|["'`.]+$/g, '').trim()
+  if (g === 'SAME') return cur
+  if (!g || g === 'NONE' || g.endsWith('?') || g.split(/\s+/).length > 8) return undefined
+  return cutWords(g, 48)
 }
 
 /** `code-review` → `Code review`. */

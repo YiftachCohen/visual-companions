@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
 import { small, smallCells } from './boo-small'
 import { change, cutWords, draw, mood, parse, plain, split, w } from './render'
-import { byGoal, goalOf, headline, outcome, skillGoal, stepOf, waiting } from './register'
+import { byGoal, goalOf, goalReply, headline, outcome, skillGoal, stepOf, waiting } from './register'
 
 const FLOW = `flow Release is blocked at the migrate step
 + build
@@ -709,4 +709,27 @@ test('activity off leaves a subagent task as written', { options: { activity: fa
   on('agent.spawn', (_, e: any) => { prompt = e.prompt; return { model: 'claude-haiku-4-5-20251001', agentId: 'ag1' } as any })
   await $.agent.spawn({ prompt: 'Find stale docs', description: 'Docs audit' } as any).catch(() => {})
   expect(prompt).toBe('Find stale docs')
+})
+
+test("Haiku's SAME keeps the goal; NONE, a question or a sentence is none", async () => {
+  expect(goalReply('SAME', 'Plan visuals')).toBe('Plan visuals')
+  expect(goalReply('"Build return card and ribbon."', 'Artifact design')).toBe('Build return card and ribbon')
+  expect(goalReply('NONE', 'Plan visuals')).toBe(undefined)
+  expect(goalReply('What are you working on now?', 'Plan visuals')).toBe(undefined)
+  expect(goalReply('The developer is asking me to look at the status line and explain it', undefined)).toBe(undefined)
+})
+
+test("a skill the model loads names the goal only when there is none", async ($, on) => {
+  let state: any = { goal: 'Plan comprehension visuals' }
+  on('state.get', () => ({ value: { value: state, version: 1 } }))
+  on('state.set', (_, e: any) => { state = e.value; return { value: { version: 2 } } as any })
+  on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
+  const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
+  await $.tool.call({ tool: 'Skill', skill: 'artifact-design' } as any).catch(() => {})
+  await settle()
+  expect(state.goal).toBe('Plan comprehension visuals')
+  state = {}
+  await $.tool.call({ tool: 'Skill', skill: 'code-review' } as any).catch(() => {})
+  await settle()
+  expect(state.goal).toBe('Code review')
 })
