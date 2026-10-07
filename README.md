@@ -4,13 +4,29 @@ A Claude Code plugin that adds a small visual to replies that report a result, a
 
 The agent opens such a reply with a short ` ```viz ` block. The plugin draws that block as a framed terminal visual above the prose. A line above the prompt shows what the work is for and where it landed, so you can see the state of a session at a glance when you switch back to it. It leads with any question the agent is waiting on you to answer, and says when another session is waiting on you.
 
-`/catchup` gives the lay of the land in one pane:
+When 10 minutes or more have passed since you last typed and work happened since, the line grows into a return card. The card says how long it has been, how long the agent worked, how many tool calls it made and how many agents finished. It also shows each visual since then as its glyph, the next step, which files were edited, and the ribbon:
+
+```
+Fix token refresh → Refresh race fixed, tests green  12m ago
+40m since you typed · worked 18m · 45 tool calls · 2 agents finished
+✓ ✗ ✓ ✓  since then
+→ Need a batching decision first.
+✎ 3 files in hooks/auth/
+ 2h ▃▃▄▄▆▆██▇▇▅▅▄▄▃▃▄▄▇▇▇▇╎██▆▆▄▄▅▅▇▇██▆▆▄▄▃▃▅▅ now
+    Map the…    Hunt the…    Fix and…    Write docs
+```
+
+The ribbon is the session on one line: one bar per turn. A bar's height is the number of tool calls in that turn, its agents' calls included. Its colour is the outcome of the visual the turn drew. Turns from before you last typed are dim, and `╎` marks a compaction. Each stretch of work on one goal is named under its bars. When rows are short, the ribbon gives way first.
+
+Before a compaction, the plugin asks the summary to keep what the visuals recorded: decisions (★), each goal's open blocker, and questions you haven't answered. Afterwards it leaves a marker in the transcript (`⟲ Compacted · 112k → 18k tokens · asked to keep 2 decisions, 1 blocker · /catchup`), drawn as a card where the transcript draws notices. The marker also appears in the ribbon and in `/catchup`.
+
+`/catchup` gives the lay of the land in one pane, under the ribbon:
 
 - **Needs you**: questions the agent asked since you last typed.
 - **Goals**: each piece of work in the session, where it stands, and its latest headline. An open blocker belongs to its goal and clears when a newer status visual for that goal isn't red.
 - **Agents**: each subagent or teammate, with what it is doing now or what it found.
 - **Other sessions**: other sessions with a visual in the last day, those waiting on you first.
-- One visual in full, then the earlier ones. Press any headline to open it.
+- One visual in full, then the earlier ones, with compactions among them. Press any headline to open it.
 
 ```
 ╭─ Release is blocked at the migrate step  2/4
@@ -31,7 +47,7 @@ The agent opens such a reply with a short ` ```viz ` block. The plugin draws tha
 
 ## Cost
 
-The plugin adds a ~200-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line and `/catchup` run locally and use no model tokens.
+The plugin adds a ~200-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card, the ribbon and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
 
 ## Forms
 

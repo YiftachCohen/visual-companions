@@ -3,6 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import { big, booMood } from './boo'
 import type { Companion, Look } from './boo'
 import { small } from './boo-small'
+import { card, checkpointCard, cutsOf, keepInstructions, NOTICE, noticeText, ribbon, span, tokens, turnsOf } from './land'
+import type { Checkpoint, Kept, Turn } from './land'
 import { cut, cutWords, draw, mood, split, w } from './render'
 import type { Line, Spec, Tone } from './render'
 import type { AgentNote, Now } from './contract'
@@ -22,6 +24,9 @@ const HEADLINE = 'Start your final answer with a one-line headline that states t
 const PANE = 'catchup'
 const RECENT = 8 // history rows /catchup lists before "Show all"
 const DAY = 86_400_000
+const AWAY = 10 * 60_000 // this long since you last typed, the band grows into the return card
+const TURNS = 200 // turns kept for the ribbon
+const EDITS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
 
 const NOW = { plugin: 'visual-companions', key: 'now' } as const
 const AGENTS = { plugin: 'visual-companions', key: 'agents' } as const
@@ -30,7 +35,7 @@ const AGENTS = { plugin: 'visual-companions', key: 'agents' } as const
 type Saved = { at: number; title: string; mood: string; spec: Spec; stuck?: number; goal?: string }
 
 // ◆ (neutral) has no colour: it draws dim. ★ a decision, ? a question for you.
-const MOOD: Record<string, string | undefined> = { '✗': 'error', '◉': 'warning', '▼': 'warning', '✓': 'success', '★': 'claude', '?': 'claude' }
+const MOOD: Record<string, string | undefined> = { '✗': 'error', '◉': 'warning', '▼': 'warning', '✓': 'success', '★': 'claude', '?': 'claude', '⟲': 'suggestion' }
 // Forms that report where work stands; the latest of them for a goal is that goal's state.
 const STATUS_FORMS = new Set(['flow', 'path', 'tree'])
 const COLOR: Partial<Record<Tone, string>> = { ok: 'success', bad: 'error', warn: 'warning', data: 'suggestion', pick: 'claude' }
@@ -84,12 +89,18 @@ export const register: Register = (on, options) => {
     try {
       const id = await $.session.id()
       const cutoff = (await $.clock.now()) - stale
-      for (const key of await $.store.keys()) {
-        if (!key.startsWith('h:') || key === `h:${id}`) continue
-        const saved = (await $.store.get(key)) as Saved[] | undefined
-        if ((saved?.at(-1)?.at ?? 0) < cutoff) {
-          for (const k of ['h', 'p', 'd']) await $.store.delete(`${k}:${key.slice(2)}`)
+      // A session was last active at its latest visual or turn, whichever is later.
+      const keys = await $.store.keys()
+      const ids = new Set(keys.filter(k => /^[ht]:/.test(k)).map(k => k.slice(2)))
+      ids.delete(id)
+      for (const sid of ids) {
+        let last = 0
+        for (const k of ['h', 't']) {
+          if (!keys.includes(`${k}:${sid}`)) continue
+          const kept = (await $.store.get(`${k}:${sid}`)) as Array<{ at?: number }> | undefined
+          last = Math.max(last, Number(kept?.at(-1)?.at ?? 0))
         }
+        if (last < cutoff) for (const k of ['h', 'p', 'd', 't', 'c']) await $.store.delete(`${k}:${sid}`)
       }
     } catch {} // housekeeping only
     return next(e)
@@ -137,17 +148,29 @@ export const register: Register = (on, options) => {
     const meta = [ask || lead === last ? ago(now - lead.at) : `open ${span(now - lead.at)}`, elsewhere, fresh > 1 ? `${fresh} new · /catchup` : '', agents]
       .filter(Boolean)
       .join(' · ')
-    // Idle, nothing else redraws the band: redraw it when the age it shows goes stale.
-    if (!working) aging = $.clock.after(now - lead.at < 3_600_000 ? 60_000 : 3_600_000, () => $.ui.invalidate('ui.render'))
+    // Back after a while: the band grows into the return card, what happened since you last typed.
+    const extra = working ? [] : await returning($, hist, lead, ask, now, cols - (e.surface === 'terminal' && companion ? companion.columns + 3 : 2), e.props.maxRows - (e.surface === 'terminal' && companion ? 1 + companion.rows : 1))
+    // Idle, nothing else redraws the band: redraw it when the age it shows goes stale, or when the card is due.
+    const due = hist.seen > 0 && now - hist.seen < AWAY ? hist.seen + AWAY - now : Infinity
+    if (!working) aging = $.clock.after(Math.min(due, now - lead.at < 3_600_000 ? 60_000 : 3_600_000), () => $.ui.invalidate('ui.render'))
 
     if (e.surface !== 'terminal' || !companion) {
-      const { Text } = $.ui.resolve(e)
+      const { Box, Text } = $.ui.resolve(e)
       if (busy) return <Text wrap="truncate-end">{segs(Text, doing(head, step, agents, cols))}</Text>
-      return (
-        <Text wrap="truncate-end">
+      const line = (
+        <Text key="band" wrap="truncate-end">
           <Text color={MOOD[shown.mood]} dimColor={!MOOD[shown.mood]}>{shown.mood} </Text>
           {segs(Text, landed(live?.goal, shown.title, meta, cols - 2))}
         </Text>
+      )
+      if (extra.length === 0) return line
+      return (
+        <Box flexDirection="column">
+          {line}
+          {extra.map((l, k) => (
+            <Text key={`card:${k}`} wrap="truncate-end">{'  '}{segs(Text, toned(l))}</Text>
+          ))}
+        </Box>
       )
     }
 
@@ -189,6 +212,7 @@ export const register: Register = (on, options) => {
           : busy
             ? [doing('', step, agents, room), [{ t: cutWords(shown.title, room), dim: true }]]
             : [[{ t: cutWords(shown.title, room) }], [{ t: cutWords([live?.goal, meta].filter(Boolean).join(' · '), room), dim: true }]]
+    body.push(...extra.map(toned))
     return (
       <Box flexDirection="row" gap={1} marginTop={1}>
         <Raster key="boo" columns={columns} rows={rows} cells={drawn} />
@@ -215,9 +239,15 @@ export const register: Register = (on, options) => {
   // its task list the task in progress, any other tool the step.
   const tasks = new Map<string, { wording: string; done: boolean }>() // task id → its in-progress wording, from TaskCreate
   const counts = () => ({ done: [...tasks.values()].filter(t => t.done).length, total: tasks.size })
+  // This turn's work for the ribbon and the return card: tool calls (bookkeeping aside, agents' included) and files edited.
+  let turnTools = 0
+  let turnFiles = new Set<string>()
   on('tool.call', async ($, e, next) => {
-    if (!activity) return next(e)
     const a = e as unknown as Record<string, any>
+    if (stepOf(a) !== undefined) turnTools++
+    const file = EDITS.has(e.tool) ? (a.file_path ?? a.notebook_path) : undefined
+    if (typeof file === 'string' && file) turnFiles.add(file)
+    if (!activity) return next(e)
     // A subagent's or teammate's call: only its step, kept per agent for /catchup.
     if (e.agentId !== undefined) {
       const id = e.agentId
@@ -300,22 +330,67 @@ export const register: Register = (on, options) => {
       $.ui.invalidate('ui.render')
       $.clock.after(1000, () => $.ui.invalidate('ui.render'))
     }
-    if (e.agentId === undefined && e.answer.includes('```viz')) {
-      const spec = split(e.answer).flatMap(p => ('viz' in p ? [p.viz] : [])).at(-1)
+    if (e.agentId === undefined) {
+      const tools = turnTools
+      const files = [...turnFiles]
+      turnTools = 0
+      turnFiles = new Set()
+      const spec = e.answer.includes('```viz') ? split(e.answer).flatMap(p => ('viz' in p ? [p.viz] : [])).at(-1) : undefined
+      const h = await history($, held)
+      await notes // the goal a prompt or skill named this turn is written by now (or regoal fills it in later)
+      const goal = activity ? ((await $.state.get(NOW)).value?.goal ?? undefined) : undefined
+      const at = await $.clock.now()
+      let entry: Saved | undefined
       if (spec) {
-        const h = await history($, held)
-        await notes // the goal a prompt or skill named this turn is written by now (or regoal fills it in later)
         const saved = h.saved
-        const goal = activity ? ((await $.state.get(NOW)).value?.goal ?? undefined) : undefined
-        const entry: Saved = { at: await $.clock.now(), title: spec.title, mood: mood(spec).glyph, spec, ...(goal ? { goal } : {}) }
+        entry = { at, title: spec.title, mood: mood(spec).glyph, spec, ...(goal ? { goal } : {}) }
         const stuck = entry.mood === '✓' ? stuckSince(saved.filter(s => s.goal === goal)) : undefined
         if (stuck !== undefined) entry.stuck = entry.at - stuck
         h.saved = [...saved, entry].slice(-keep)
         await $.store.set(`h:${h.id}`, h.saved)
-        $.ui.invalidate('ui.render')
       }
+      // The ribbon's bar for this turn; a failure here costs the bar, never the turn.
+      try {
+        const turn: Turn = { at, tools, ms: e.durationMs, ...(entry ? { mood: entry.mood } : {}), ...(goal ? { goal } : {}), ...(files.length ? { files } : {}) }
+        h.turns = [...h.turns, turn].slice(-TURNS)
+        await $.store.set(`t:${h.id}`, h.turns)
+      } catch {}
+      $.ui.invalidate('ui.render')
     }
     return next(e)
+  })
+
+  // Compaction is where the agent forgets and the scrollback goes: ask the summary to keep what the
+  // visuals say was decided, is blocked or waits on you, then mark the spot in the transcript,
+  // the ribbon and /catchup. No model tokens: the summarizer reads a few lines more.
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const h = await history($, held)
+    const kept = keepOf(h.saved, h.seen)
+    // A rewrite needs the transcript it runs over; without one the compaction goes ahead as asked.
+    const extra = Array.isArray(e.messages) ? keepInstructions(kept) : undefined
+    const r = await next(extra ? { ...e, instructions: e.instructions ? `${e.instructions}\n\n${extra}` : extra } : e)
+    if (e.trigger === 'precompute' || r.messages === undefined) return r
+    // After `next` nothing may throw: the catch below would compact a second time.
+    try {
+      const c = { at: await $.clock.now(), trigger: e.trigger ?? 'plugin', ...(r.tokensBefore !== undefined ? { before: r.tokensBefore } : {}), ...(r.tokensAfter !== undefined ? { after: r.tokensAfter } : {}), kept }
+      const cp: Checkpoint = { ...c, notice: noticeText(c) }
+      h.cuts = [...h.cuts, cp].slice(-20)
+      await $.store.set(`c:${h.id}`, h.cuts)
+      // Once the compacted conversation is in place, so the marker lands after it.
+      $.clock.after(500, () => void $.session.append({ message: { type: 'system', content: [{ type: 'text', text: cp.notice }] } }).catch(() => {}))
+      $.ui.invalidate('ui.render')
+    } catch {}
+    return r
+  }).catch(($, e, next) => next(e))
+
+  // The marker as the checkpoint's card, where the transcript draws it as a notice.
+  on('ui.render', { component: 'InfoNotice' }, async ($, e, next) => {
+    if (!e.props.text.startsWith(NOTICE)) return next(e)
+    const c = (await history($, held)).cuts.find(c => c.notice === e.props.text)
+    if (!c) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return <Box flexDirection="column" paddingLeft={2}>{visual({ Box, Text }, checkpointCard(c, (e.viewport?.columns ?? 80) - 2))}</Box>
   })
 
   on('command.run', { command: 'catchup' }, async $ => {
@@ -330,12 +405,12 @@ export const register: Register = (on, options) => {
   // the rest of the history, newest first.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const { id, saved, seen } = await history($, held)
+    const { id, saved, seen, turns, cuts } = await history($, held)
     const now = await $.clock.now()
     const cols = e.props.bodyColumns ?? e.viewport?.columns ?? 80
     const crew = activity ? await agentRows($, now) : []
     const others = await otherSessions($, id, now)
-    if (saved.length === 0 && crew.length === 0 && others.length === 0)
+    if (saved.length === 0 && crew.length === 0 && others.length === 0 && cuts.length === 0)
       return <Text dimColor>Nothing yet. Visuals the agent draws in this session collect here.</Text>
     const show = (at: number) => () => { open = at; $.ui.invalidate('ui.render') }
     const fresh = saved.filter(s => s.at > seen).length
@@ -343,9 +418,12 @@ export const register: Register = (on, options) => {
     const goals = byGoal(saved)
     const named = goals.some(g => g.goal !== undefined)
     const lead = saved.length ? (waiting(saved, seen) ?? outcome(saved)) : undefined
-    const picked = saved.find(s => s.at === open) ?? lead
-    const rest = saved.filter(s => s !== picked).reverse()
+    const pickedCut = cuts.find(c => c.at === open)
+    const picked = pickedCut ? undefined : (saved.find(s => s.at === open) ?? lead)
+    // The history newest first, the compactions in among the visuals.
+    const rest: Array<Saved | Checkpoint> = [...saved.filter(s => s !== picked), ...cuts.filter(c => c !== pickedCut)].sort((a, b) => b.at - a.at)
     const list = all ? rest : rest.slice(0, RECENT)
+    const strip = turns.length >= 3 ? ribbon(turns, cols, now, seen, cuts.map(c => c.at)) : []
     const room = (used: number) => Math.max(10, cols - used)
     const glyph = (g: string) => <Text color={MOOD[g]} dimColor={!MOOD[g]}>{g} </Text>
     const head = (t: string) => <Text bold>{t}</Text>
@@ -353,8 +431,9 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         <Text>
           <Text bold>{fresh ? `${fresh} new` : 'Up to date'}</Text>
-          <Text dimColor>{` · ${saved.length} visual${saved.length === 1 ? '' : 's'}${named ? ` · ${goals.length} goal${goals.length === 1 ? '' : 's'}` : ''}`}</Text>
+          <Text dimColor>{` · ${saved.length} visual${saved.length === 1 ? '' : 's'}${named ? ` · ${goals.length} goal${goals.length === 1 ? '' : 's'}` : ''}${turns.length ? ` · ${turns.length} turn${turns.length === 1 ? '' : 's'}` : ''}`}</Text>
         </Text>
+        {strip.length > 0 && <Box marginTop={1}>{visual({ Box, Text }, strip)}</Box>}
         {asks.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             {head('Needs you')}
@@ -408,6 +487,12 @@ export const register: Register = (on, options) => {
             ))}
           </Box>
         )}
+        {pickedCut && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text dimColor>{ago(now - pickedCut.at)}</Text>
+            {visual({ Box, Text }, checkpointCard(pickedCut, cols))}
+          </Box>
+        )}
         {picked && (
           <Box flexDirection="column" marginTop={1}>
             <Text dimColor>
@@ -421,7 +506,13 @@ export const register: Register = (on, options) => {
         {rest.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             {head('Earlier')}
-            {list.map(s => (
+            {list.map(s => 'kept' in s ? (
+              <Box key={`c:${s.at}`}>
+                {glyph('⟲')}
+                <Button key={`c:${s.at}`} label={compacted(s)} onPress={show(s.at)} />
+                <Text dimColor>{`  ${ago(now - s.at)}`}</Text>
+              </Box>
+            ) : (
               <Box key={`v:${s.at}`}>
                 {glyph(s.spec.ask ? '?' : s.mood)}
                 <Button key={`v:${s.at}`} label={cutWords(s.title, room(16))} onPress={show(s.at)} />
@@ -464,14 +555,16 @@ function pick<T extends string>(v: unknown, allowed: readonly T[], fallback: T):
 const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).at(-1) ?? ''
 const quoted = (q: unknown) => `“${cut(String(q ?? ''), 32)}”`
 
-type Held = { cache: { id: string; saved: Saved[]; seen: number } | null } // seen: when you last typed
+// seen: when you last typed. turns: one per main-loop turn, for the ribbon. cuts: the compactions.
+type Held = { cache: { id: string; saved: Saved[]; seen: number; turns: Turn[]; cuts: Checkpoint[] } | null }
 
 /** This session's history, kept in `held` so the band, redrawn on every tool call, skips the store. */
 async function history($: EngineInterface, held: Held) {
   const id = await $.session.id()
   if (held.cache?.id !== id) {
     const saved = ((await $.store.get(`h:${id}`)) as Saved[] | undefined) ?? []
-    held.cache = { id, saved, seen: Number((await $.store.get(`p:${id}`)) ?? 0) }
+    const seen = Number((await $.store.get(`p:${id}`)) ?? 0)
+    held.cache = { id, saved, seen, turns: turnsOf(await $.store.get(`t:${id}`)), cuts: cutsOf(await $.store.get(`c:${id}`)) }
   }
   return held.cache
 }
@@ -547,15 +640,18 @@ export function goalOf(text: string): string | undefined {
   return undefined
 }
 
-type Seg2 = { t: string; dim?: boolean }
+type Seg2 = { t: string; dim?: boolean; color?: string; bold?: boolean }
 
 function segs(Text: any, l: Seg2[]) {
   return l.map((s, k) => (
-    <Text key={String(k)} dimColor={s.dim}>
+    <Text key={String(k)} dimColor={s.dim} color={s.color} bold={s.bold}>
       {s.t}
     </Text>
   ))
 }
+
+/** A drawn line's tones as the band's segments. */
+const toned = (l: Line): Seg2[] => l.map(s => ({ t: s.t, dim: s.tone === 'dim', bold: s.tone === 'title', color: s.tone ? COLOR[s.tone] : undefined }))
 
 /** The task, or with none the list, and how far through the list it is: `Checking the spec 2/5`. */
 function progress(now: Now | null): string | undefined {
@@ -578,6 +674,39 @@ function landed(goal: string | undefined, title: string, meta: string, n: number
   return [...lead, { t: cutWords(title, room) }, ...m]
 }
 
+/** What the visuals say a summary must not lose: decisions, each goal's open blocker, questions you haven't answered. */
+export function keepOf(saved: Saved[], seen: number): Kept {
+  return {
+    decisions: saved.filter(s => s.mood === '★').slice(-5).map(s => s.title),
+    blockers: byGoal(saved).map(g => outcome(g.saved)).filter(s => s.mood === '✗').slice(0, 5).map(s => s.title),
+    asks: saved.filter(s => s.spec.ask && s.at > seen).slice(-3).map(s => s.spec.soWhat ?? s.title),
+  }
+}
+
+const compacted = (c: Checkpoint) => {
+  const n = c.kept.decisions.length + c.kept.blockers.length + c.kept.asks.length
+  return ['Compacted', c.before !== undefined && c.after !== undefined ? `${tokens(c.before)} → ${tokens(c.after)} tokens` : '', n ? `${n} kept` : ''].filter(Boolean).join(' · ')
+}
+
+let root: string | undefined // the session's folder, so the card names edited files from there
+
+/** The return card's lines under the band, in `room` cells and at most `rows` lines; none until you've been
+ *  away AWAY since you last typed and something happened since. */
+async function returning($: EngineInterface, hist: NonNullable<Held['cache']>, lead: Saved, ask: Saved | undefined, now: number, room: number, rows: number): Promise<Line[]> {
+  if (!(hist.seen > 0) || now - hist.seen < AWAY || rows < 1) return []
+  try {
+    const notes = Object.values((await $.state.get(AGENTS)).value ?? {}) as unknown[]
+    const agentsDone = notes.filter(n => !!n && typeof n === 'object' && !!(n as AgentNote).result && (n as AgentNote).at > hist.seen).length
+    const busy = hist.saved.some(s => s.at > hist.seen) || hist.turns.some(t => t.at > hist.seen && (t.tools > 0 || t.mood)) || agentsDone > 0
+    if (!busy) return []
+    root ??= String((await $.session.root()) ?? '')
+    const next = ask ? undefined : lead.spec.soWhat
+    return card({ now, seen: hist.seen, saved: hist.saved, turns: hist.turns, cuts: hist.cuts.map(c => c.at), agentsDone, next, root }, room, rows)
+  } catch {
+    return []
+  }
+}
+
 /** Where the latest goal stands: its latest status visual (flow, path, tree) when that is red, else the latest
  *  visual. A blocker clears once a newer status visual of its goal is not red, or the work moves to another goal. */
 export function outcome(saved: Saved[]): Saved {
@@ -598,13 +727,21 @@ export function byGoal(saved: Saved[]): Array<{ goal?: string; saved: Saved[] }>
   return [...groups].map(([goal, saved]) => ({ goal, saved })).sort((a, b) => b.saved.at(-1)!.at - a.saved.at(-1)!.at)
 }
 
-/** Gives the visuals saved at or after `since` the goal named for that prompt, when it came in after they were saved. */
+/** Gives the visuals and turns saved at or after `since` the goal named for that prompt, when it came in after they were saved. */
 async function regoal($: EngineInterface, held: Held, since: number, goal: string) {
   try {
     const h = await history($, held)
-    if (!h.saved.some(s => s.at >= since && s.goal !== goal)) return
-    h.saved = h.saved.map(s => (s.at >= since ? { ...s, goal } : s))
-    await $.store.set(`h:${h.id}`, h.saved)
+    const turns = h.turns.some(t => t.at >= since && t.goal !== goal)
+    const saved = h.saved.some(s => s.at >= since && s.goal !== goal)
+    if (!turns && !saved) return
+    if (turns) {
+      h.turns = h.turns.map(t => (t.at >= since ? { ...t, goal } : t))
+      await $.store.set(`t:${h.id}`, h.turns)
+    }
+    if (saved) {
+      h.saved = h.saved.map(s => (s.at >= since ? { ...s, goal } : s))
+      await $.store.set(`h:${h.id}`, h.saved)
+    }
     $.ui.invalidate('ui.render')
   } catch {}
 }
@@ -706,9 +843,3 @@ function stuckSince(saved: Saved[]): number | undefined {
 
 const unblocked = (ms: number) => (ms < 30_000 ? 'unblocked' : `unblocked after ${span(ms)}`)
 const ago = (ms: number) => (ms < 30_000 ? 'just now' : `${span(ms)} ago`)
-
-/** `12m`, `3h`, `2d`. */
-function span(ms: number) {
-  const m = Math.max(1, Math.round(ms / 60000))
-  return m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`
-}

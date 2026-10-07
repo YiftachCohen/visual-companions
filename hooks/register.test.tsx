@@ -3,7 +3,9 @@ import { expect, test } from 'claude-code/testing'
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
 import { small, smallCells } from './boo-small'
 import { change, cutWords, draw, mood, parse, plain, split, w } from './render'
-import { byGoal, goalOf, goalReply, headline, outcome, skillGoal, stepOf, waiting } from './register'
+import { card, checkpointCard, keepInstructions, noticeText, place, ribbon } from './land'
+import type { Checkpoint } from './land'
+import { byGoal, goalOf, goalReply, headline, keepOf, outcome, skillGoal, stepOf, waiting } from './register'
 
 const FLOW = `flow Release is blocked at the migrate step
 + build
@@ -473,7 +475,7 @@ test('history keeps as many visuals as the option says', { options: { history: '
   on('session.id', () => ({ value: 's1' }))
   on('clock.now', () => ({ value: 10_000 }))
   on('store.get', () => ({ value: old }))
-  on('store.set', (_, e: any) => { stored = e.value; return { value: undefined } as any })
+  on('store.set', (_, e: any) => { if (e.key === 'h:s1') stored = e.value; return { value: undefined } as any })
   await $.turn.complete({ answer: '```viz\nflow Done\n+ a\n```', agentId: undefined } as any).catch(() => {})
   expect(stored.length).toBe(10)
 })
@@ -732,4 +734,226 @@ test("a skill the model loads names the goal only when there is none", async ($,
   await $.tool.call({ tool: 'Skill', skill: 'code-review' } as any).catch(() => {})
   await settle()
   expect(state.goal).toBe('Code review')
+})
+
+// The session at a glance: ribbon, return card, compaction checkpoint.
+
+const MIN = 60_000
+const turn = (at: number, tools: number, extra: Record<string, unknown> = {}) => ({ at, tools, ms: MIN, ...extra })
+const text = (lines: Array<Array<{ t: string }>>) => lines.map(l => l.map(s => s.t).join('')).join('\n')
+
+test('the ribbon is one bar per turn, as tall as its work, coloured by its outcome', async () => {
+  const turns = [turn(0, 2, { goal: 'Map' }), turn(MIN, 40, { goal: 'Map', mood: '✓' }), turn(2 * MIN, 10, { goal: 'Fix race', mood: '✗' }), turn(3 * MIN, 0, { goal: 'Fix race' })]
+  const lines = ribbon(turns, 60, 4 * MIN, 1.5 * MIN)
+  const [bars, names] = lines
+  expect(text([bars])).toBe(' 4m ▃▃██▅▅▁▁ now')
+  // The turn's visual sets its colour; turns from before you last typed are dim, later ones plain.
+  expect(bars.find(s => s.t === '██')?.tone).toBe('ok')
+  expect(bars.find(s => s.t === '▅▅')?.tone).toBe('bad')
+  expect(bars.find(s => s.t.includes('▃▃'))?.tone).toBe('dim')
+  expect(bars.find(s => s.t === '▁▁')?.tone).toBe(undefined)
+  // Each goal's stretch is named under it where the name fits; a long name needs more room than three cells.
+  expect(text([names])).toBe('    Map')
+  const wide = ribbon(turns, 40, 4 * MIN)
+  expect(text([wide[1]])).toMatch(/^ {4}Map/)
+})
+
+test('the ribbon marks compactions and lets the oldest turns go when it runs out of room', async () => {
+  const turns = Array.from({ length: 100 }, (_, i) => turn(i * MIN, i % 7))
+  const [bars] = ribbon(turns, 40, 100 * MIN, Infinity, [90.5 * MIN])
+  const t = text([bars])
+  expect(t.length).toBeLessThan(41)
+  expect(t).toContain('╎')
+  expect(t.endsWith(' now')).toBe(true)
+  // The left label is how long ago the first bar shown was, not the session's start.
+  expect(t.startsWith('100m')).toBe(false)
+  expect(ribbon([], 40, 0)).toEqual([])
+})
+
+test('edited files read as names, or as a count and the folder they share', async () => {
+  expect(place(['/r/hooks/render.ts', '/r/hooks/render.ts', '/r/hooks/boo.ts'], '/r')).toBe('render.ts, boo.ts')
+  expect(place(['/r/hooks/auth/a.ts', '/r/hooks/auth/b.ts', '/r/hooks/auth/c/d.ts'], '/r')).toBe('3 files in hooks/auth/')
+  expect(place(['/r/a.ts', '/r/b.ts', '/r/c.ts'], '/r')).toBe('3 files')
+})
+
+test('the return card says how long, how much work, what came in, what is next and where the edits landed', async () => {
+  const saved = [at(1 * MIN, FLOW), at(30 * MIN, 'flow Cache warmed\n+ a'), at(40 * MIN, 'flow Fixed\n+ a')]
+  const turns = [turn(MIN, 5), turn(30 * MIN, 12, { mood: '✓', files: ['/r/hooks/a.ts'] }), turn(40 * MIN, 30, { mood: '✓', files: ['/r/hooks/b.ts', '/r/hooks/c.ts'] })]
+  const i = { now: 47 * MIN, seen: 5 * MIN, saved, turns, cuts: [], agentsDone: 2, next: 'Ship it after review.', root: '/r' }
+  const all = text(card(i, 80, 10))
+  expect(all).toContain('42m since you typed · worked 2m · 42 tool calls · 2 agents finished')
+  expect(all).toContain('✓ ✓  since then')
+  expect(all).toContain('→ Ship it after review.')
+  expect(all).toContain('✎ 3 files in hooks/')
+  expect(all).toMatch(/now$/m)
+  // Short of rows, the ribbon gives way first, then the glyphs; the facts and the next step stay.
+  const two = text(card(i, 80, 2))
+  expect(two.split('\n').length).toBe(2)
+  expect(two).toContain('since you typed')
+  expect(two).toContain('→ Ship it')
+  expect(card(i, 80, 0)).toEqual([])
+})
+
+function away($: any, on: any, seen: number) {
+  const saved = [at(1 * MIN, FLOW), at(40 * MIN, 'flow Cache warmed\n+ a\n> Ship it after review.')]
+  const turns = [turn(MIN, 5), turn(20 * MIN, 9), turn(40 * MIN, 30, { mood: '✓', files: ['/r/hooks/b.ts'] })]
+  on('session.id', () => ({ value: 's1' }))
+  on('session.root', () => ({ value: '/r' }) as any)
+  on('clock.now', () => ({ value: 47 * MIN }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.get', (_: unknown, e: any) => ({ value: ({ 'h:s1': saved, 'p:s1': seen, 't:s1': turns } as any)[e.key] }))
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`back after a while, the band grows into the return card (${surface})`, async ($, on) => {
+    away($, on, 5 * MIN)
+    const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100 } as any
+    const ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+    expect(await ui.find({ type: 'Text', text: /Cache warmed/ })).not.toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /42m since you typed/ })).not.toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /→ Ship it after review\./ })).not.toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /✎ b\.ts/ })).not.toBe(undefined)
+  })
+
+  test(`a recent prompt keeps the band to its line (${surface})`, async ($, on) => {
+    away($, on, 42 * MIN)
+    const props = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100 } as any
+    const ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'AbovePrompt', props })
+    expect(await ui.find({ type: 'Text', text: /Cache warmed/ })).not.toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /since you typed/ })).toBe(undefined)
+  })
+}
+
+test('the return card fits the rows the band is given, and waits while the model works', async ($, on) => {
+  away($, on, 5 * MIN)
+  const tight = await $.ui.mount({ plugin: 'visual-companions', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 1, bodyColumns: 100 } as any })
+  expect(await tight.find({ type: 'Text', text: /since you typed/ })).toBe(undefined)
+  const busy = await $.ui.mount({ plugin: 'visual-companions', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 100 } as any })
+  expect(await busy.find({ type: 'Text', text: /since you typed/ })).toBe(undefined)
+})
+
+test("each turn is kept for the ribbon: its tool calls, agents' included, the files it edited, its visual", async ($, on) => {
+  const store = new Map<string, unknown>()
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 500 }))
+  on('store.get', (_, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('state.get', () => ({ value: { value: { goal: 'Fix race' }, version: 1 } }))
+  on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
+  on('turn.complete', () => ({ text: '' }))
+  await $.tool.call({ tool: 'Read', file_path: '/r/a.ts' } as any).catch(() => {})
+  await $.tool.call({ tool: 'Edit', file_path: '/r/a.ts', old_string: 'a', new_string: 'b' } as any).catch(() => {})
+  await $.tool.call({ tool: 'Grep', pattern: 'x', agentId: 'ag1' } as any).catch(() => {})
+  await $.tool.call({ tool: 'TodoWrite', todos: [] } as any).catch(() => {})
+  await $.turn.complete({ answer: '```viz\n' + FLOW + '\n```', durationMs: 4_000, isAborted: false, turnId: '1', reason: 'answer' } as any)
+  // A subagent's own turn ending is no bar.
+  await $.turn.complete({ answer: 'Found it', agentId: 'ag1', durationMs: 1, isAborted: false, turnId: '2', reason: 'answer' } as any)
+  await $.turn.complete({ answer: 'ok', durationMs: 1_000, isAborted: false, turnId: '3', reason: 'answer' } as any)
+  expect(store.get('t:s1')).toEqual([
+    { at: 500, tools: 3, ms: 4_000, mood: '✗', goal: 'Fix race', files: ['/r/a.ts'] },
+    { at: 500, tools: 0, ms: 1_000, goal: 'Fix race' },
+  ])
+})
+
+test('the checkpoint keeps decisions, open blockers and unanswered questions', async () => {
+  const saved = [
+    at(1, 'matrix Postgres wins\n@ cols=cost\npg: + *\nlite: x', 'Pick db'),
+    at(2, FLOW, 'Migrate users'),
+    at(3, 'flow Fixed\n+ a', 'Other'),
+    at(4, 'flow Q\n+ a\n> ? Batch or lock?', 'Migrate users'),
+  ]
+  const kept = keepOf(saved, 3)
+  expect(kept.decisions).toEqual(['Postgres wins'])
+  expect(kept.asks).toEqual(['Batch or lock?'])
+  // Answered questions (typed after) are not kept.
+  expect(keepOf(saved, 10).asks).toEqual([])
+  expect(keepInstructions(kept)).toContain('Decisions made: Postgres wins')
+  expect(keepInstructions({ decisions: [], blockers: [], asks: [] })).toBe(undefined)
+  const c = { at: 0, trigger: 'auto', before: 112_400, after: 18_000, kept: { decisions: ['Postgres wins'], blockers: ['Release is blocked'], asks: [] } }
+  expect(noticeText(c)).toBe('⟲ Compacted · 112k → 18k tokens · asked to keep 1 decision, 1 blocker · /catchup')
+  const card = plain(checkpointCard({ ...c, notice: noticeText(c) }, 72))
+  expect(card).toContain('★ Postgres wins')
+  expect(card).toContain('✗ Release is blocked')
+  expect(card).toContain('112k → 18k tokens · auto')
+})
+
+const TRANSCRIPT = [{ role: 'user', text: 'Migrate the users table', toolUses: [] }] as any
+
+test('a compaction is asked to keep what the visuals say, and leaves a checkpoint', async ($, on) => {
+  const store = new Map<string, unknown>([['h:s1', [at(1, 'tradeoff Self-host\n@ x=a; y=b\nself: 0.5 0.5 *'), at(2, FLOW)]], ['p:s1', 0]])
+  let told: string | undefined
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 9_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.get', (_, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('session.compact', (_, e: any) => { told = e.instructions; return { messages: [{ role: 'user', text: 'summary', toolUses: [] }], tokensBefore: 120_000, tokensAfter: 20_000 } as any })
+  await $.session.compact({ trigger: 'manual', messages: TRANSCRIPT, instructions: 'focus on the migration' })
+  expect(told).toMatch(/^focus on the migration\n\nThe user follows this session/)
+  expect(told).toContain('Decisions made: Self-host')
+  expect(told).toContain('Open blockers: Release is blocked at the migrate step')
+  const [c] = store.get('c:s1') as Checkpoint[]
+  expect([c.at, c.before, c.after, c.trigger]).toEqual([9_000, 120_000, 20_000, 'manual'])
+  expect(c.notice).toBe('⟲ Compacted · 120k → 20k tokens · asked to keep 1 decision, 1 blocker · /catchup')
+})
+
+test('a skipped compaction leaves no checkpoint', async ($, on) => {
+  const store = new Map<string, unknown>()
+  on('session.id', () => ({ value: 's1' }))
+  on('store.get', (_, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('session.compact', () => ({ skip: 'not now' }) as any)
+  await $.session.compact({ trigger: 'auto', messages: TRANSCRIPT }).catch(() => {})
+  expect(store.get('c:s1')).toBe(undefined)
+})
+
+test("a precompute or a subagent's compaction leaves no checkpoint", async ($, on) => {
+  const store = new Map<string, unknown>([['h:s1', [at(2, FLOW)]]])
+  const told: Array<string | undefined> = []
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 9_000 }))
+  on('store.get', (_, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e: any) => (store.set(e.key, e.value), { value: undefined }))
+  on('session.compact', (_, e: any) => { told.push(e.instructions); return { messages: [{ role: 'user', text: 'summary', toolUses: [] }] } as any })
+  await $.session.compact({ trigger: 'precompute', messages: TRANSCRIPT })
+  await $.session.compact({ trigger: 'auto', messages: TRANSCRIPT, agentId: 'ag1' } as any).catch(() => {})
+  // A precompute's summary may be the one used later, so it is asked too; the subagent's is left alone.
+  expect(told[0]).toContain('Open blockers: Release is blocked')
+  expect(told.slice(1).every(t => t === undefined)).toBe(true)
+  expect(store.get('c:s1')).toBe(undefined)
+})
+
+const CUT: Checkpoint = { at: 9_000, trigger: 'auto', before: 120_000, after: 20_000, kept: { decisions: ['Self-host'], blockers: [], asks: [] }, notice: '⟲ Compacted · 120k → 20k tokens · asked to keep 1 decision · /catchup' }
+
+test("the transcript's compaction marker draws as the checkpoint card", async ($, on) => {
+  on('session.id', () => ({ value: 's1' }))
+  on('store.get', (_, e: any) => ({ value: ({ 'c:s1': [CUT] } as any)[e.key] }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine notice</Text>
+  })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'InfoNotice', props: { text: CUT.notice, command: null } as any })
+    expect(await ui.find({ type: 'Text', text: /Compacted · asked the summary to keep 1/ })).not.toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /Self-host/ })).not.toBe(undefined)
+    const other = await $.ui.mount({ plugin: 'visual-companions', surface, component: 'InfoNotice', props: { text: 'Conversation compacted', command: null } as any })
+    expect(await other.find({ type: 'Text', text: /engine notice/ })).not.toBe(undefined)
+  }
+})
+
+test('/catchup opens with the ribbon and lists compactions among the visuals', async ($, on) => {
+  const hist = [at(1_000, FLOW, 'Migrate users'), at(20_000, 'flow Fixed\n+ a', 'Migrate users')]
+  const turns = [turn(1_000, 4, { mood: '✗', goal: 'Migrate users' }), turn(5_000, 9, { goal: 'Migrate users' }), turn(20_000, 2, { mood: '✓', goal: 'Migrate users' })]
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 30_000 }))
+  on('clock.after', () => ({ deny: 'no timers in this test' }))
+  on('store.keys', () => ({ value: ['h:s1'] }))
+  on('store.get', (_, e: any) => ({ value: ({ 'h:s1': hist, 'p:s1': 25_000, 't:s1': turns, 'c:s1': [CUT] } as any)[e.key] }))
+  const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
+  expect(await ui.find({ type: 'Text', text: /3 turns/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /╎/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: / now$/ })).not.toBe(undefined)
+  expect(await ui.find({ type: 'Button', text: /^Compacted · 120k → 20k tokens · 1 kept$/ })).not.toBe(undefined)
+  await ui.press({ key: `c:${CUT.at}` })
+  expect(await ui.find({ type: 'Text', text: /Compacted · asked the summary to keep 1/ })).not.toBe(undefined)
 })
