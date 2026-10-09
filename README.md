@@ -182,6 +182,15 @@ Loading the plugin generates `.claude-plugin/types/`, which `tsconfig.json` exte
 
 ## Changelog
 
+### 0.3.1
+
+- The guide says `x` means stuck and `-` covers ruled out, so a gap in an analysis no longer shows as the goal's open blocker in the band and in what a compaction is asked to keep.
+- The guide asks the agent not to restate a visual in prose.
+- Sessions that never drew a visual are deleted after `retention` days like the rest, instead of staying in the store.
+- `/catchup` no longer names a session "[object Object]" when its stored folder is from an older version.
+- A prompt and the end of a turn no longer wait on the plugin's store.
+- The stated costs are corrected: the guide is ~400 tokens and a visual ~80.
+
 ### 0.3.0
 
 - Return card: after 10 minutes away, the band grows into a summary of what happened since you typed.
