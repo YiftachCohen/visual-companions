@@ -8,6 +8,9 @@ import { card, checkpointCard, clashText, collisions, crowded, keepInstructions,
 import type { Checkpoint } from './land'
 import { byGoal, goalOf, goalReply, headline, inTranscript, keepOf, lastAt, outcome, sinceSeen, skillGoal, stepOf, waiting } from './register'
 
+/** Lets the plugin's background notes run: a turn's visual is saved off the turn's path. */
+const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
+
 const FLOW = `flow Release is blocked at the migrate step
 + build
 + unit tests
@@ -275,7 +278,7 @@ test('a green visual records how long the work was stuck since it first went red
   on('store.get', (_, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_, e: any) => (store.set(e.key, e.value), { value: undefined }))
   on('turn.complete', () => ({ text: '' }))
-  const turn = (answer: string) => $.turn.complete({ answer, durationMs: 1, isAborted: false, turnId: String(now), reason: 'answer' } as any)
+  const turn = (answer: string) => $.turn.complete({ answer, durationMs: 1, isAborted: false, turnId: String(now), reason: 'answer' } as any).then(settle)
   const viz = (src: string) => '```viz\n' + src + '\n```\n'
   await turn(viz('flow Shipped earlier\n+ a\n+ b'))
   now = 60_000
@@ -479,6 +482,7 @@ test('history keeps as many visuals as the option says', { options: { history: '
   on('store.get', () => ({ value: old }))
   on('store.set', (_, e: any) => { if (e.key === 'h:s1') stored = e.value; return { value: undefined } as any })
   await $.turn.complete({ answer: '```viz\nflow Done\n+ a\n```', agentId: undefined } as any).catch(() => {})
+  await settle()
   expect(stored.length).toBe(10)
 })
 
@@ -623,6 +627,7 @@ test('a visual is saved with the goal it was drawn for', async ($, on) => {
   on('state.get', () => ({ value: { value: { goal: 'Migrate users' }, version: 1 } }))
   on('turn.complete', () => ({ text: '' }))
   await $.turn.complete({ answer: '```viz\n' + FLOW + '\n```', durationMs: 1, isAborted: false, turnId: '1', reason: 'answer' } as any)
+  await settle()
   expect((store.get('h:s1') as Array<{ goal?: string }>)[0].goal).toBe('Migrate users')
 })
 
@@ -634,7 +639,6 @@ test("each subagent's latest step and its answer are kept for /catchup", async (
   on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
   on('turn.complete', () => ({ text: '' }))
   on('store.get', () => ({ value: undefined }))
-  const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
   await $.tool.call({ tool: 'Read', file_path: '/a/token.ts', agentId: 'ag1' } as any).catch(() => {})
   await settle()
   expect(agents?.ag1?.step).toBe('Reading token.ts')
@@ -683,6 +687,20 @@ test('/catchup names another session by its id when its folder entry is from an 
   const ui = await $.ui.mount({ plugin: 'visual-companions', surface: 'terminal', component: 'Pane', requestId: 'catchup', props: PANE })
   expect(await ui.find({ type: 'Text', text: /object Object/ })).toBe(undefined)
   expect(await ui.find({ type: 'Text', text: /^s2abcdef$/ })).not.toBe(undefined)
+})
+
+test('a prompt and a turn never wait on the store', async ($, on) => {
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.now', () => ({ value: 100 }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => new Promise(() => {}) as any) // a store that never answers
+  on('state.get', () => ({ value: { value: { goal: 'Fix race' }, version: 1 } }))
+  on('model.complete', () => new Promise(() => {}) as any)
+  on('prompt.submit', (_, e: any) => ({ text: e.text }) as any)
+  on('turn.complete', () => ({ text: '' }))
+  const within = (p: Promise<unknown>) => Promise.race([p.then(() => 'done'), new Promise(r => (globalThis as any).setTimeout(() => r('waited'), 200))])
+  expect(await within($.prompt.submit({ text: 'Fix the race', wait: false, origin: { kind: 'composer' } } as any))).toBe('done')
+  expect(await within($.turn.complete({ answer: '```viz\n' + FLOW + '\n```', durationMs: 1, isAborted: false, turnId: '1', reason: 'answer' } as any))).toBe('done')
 })
 
 test('a stored value says when it was last written', () => {
@@ -746,11 +764,12 @@ test('a goal Haiku names after the turn ended is given to the visuals since that
   on('model.complete', () => new Promise(r => (answer = r)) as any)
   on('prompt.submit', (_, e: any) => ({ text: e.text }) as any)
   on('turn.complete', () => ({ text: '' }))
-  const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
   store.set('h:s1', [{ ...at(50, FLOW, 'Older work') }])
   await $.prompt.submit({ text: 'Migrate the users table to the new schema', wait: false, origin: { kind: 'composer' } } as any)
+  await settle()
   now = 200
   await $.turn.complete({ answer: '```viz\n' + FLOW + '\n```', durationMs: 1, isAborted: false, turnId: '1', reason: 'answer' } as any)
+  await settle()
   const goals = () => (store.get('h:s1') as Array<{ goal?: string }>).map(s => s.goal)
   expect(goals()).toEqual(['Older work', 'Older work'])
   answer({ value: { isAnswered: true, text: 'Migrate users table' } })
@@ -785,7 +804,6 @@ test("a skill the model loads is a step, never the goal", async ($, on) => {
   on('state.get', () => ({ value: { value: state, version: 1 } }))
   on('state.set', (_, e: any) => { state = e.value; return { value: { version: 2 } } as any })
   on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
-  const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
   await $.tool.call({ tool: 'Skill', skill: 'artifact-design' } as any).catch(() => {})
   await settle()
   expect([state.goal, state.step]).toEqual([undefined, 'Using the Artifact design skill'])
@@ -895,9 +913,11 @@ test("each turn is kept for the return card: its tool calls, agents' included, t
   await $.tool.call({ tool: 'Grep', pattern: 'x', agentId: 'ag1' } as any).catch(() => {})
   await $.tool.call({ tool: 'TodoWrite', todos: [] } as any).catch(() => {})
   await $.turn.complete({ answer: '```viz\n' + FLOW + '\n```', durationMs: 4_000, isAborted: false, turnId: '1', reason: 'answer' } as any)
+  await settle()
   // A subagent's own turn ending is no bar.
   await $.turn.complete({ answer: 'Found it', agentId: 'ag1', durationMs: 1, isAborted: false, turnId: '2', reason: 'answer' } as any)
   await $.turn.complete({ answer: 'ok', durationMs: 1_000, isAborted: false, turnId: '3', reason: 'answer' } as any)
+  await settle()
   expect(store.get('t:s1')).toEqual([
     { at: 500, tools: 3, ms: 4_000, mood: '✗', goal: 'Fix race', files: ['/r/a.ts'] },
     { at: 500, tools: 0, ms: 1_000, goal: 'Fix race' },
@@ -1065,7 +1085,6 @@ test("each agent's lane is kept: when it was spawned and when it answered", asyn
   on('tool.call', () => ({ result: { isError: false, text: 'ok' } }) as any)
   on('turn.complete', () => ({ text: '' }))
   on('store.get', () => ({ value: undefined }))
-  const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
   await $.agent.spawn({ prompt: 'Find stale docs', description: 'Docs audit' } as any)
   await settle()
   now = 5_000
