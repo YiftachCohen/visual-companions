@@ -68,7 +68,7 @@ Updates arrive when the version changes. Claude Code doesn't auto-update third-p
 
 ## Cost
 
-The plugin adds a ~400-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 50 output tokens. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
+The plugin adds a ~400-token guide to the system prompt. It is cached with the rest of the prompt. Each visual the agent writes costs about 80 output tokens, and the guide asks the agent not to restate it in prose, so a reply with a visual need not be longer. With `activity` on, each subagent's task gets one extra line (~20 tokens) asking it to open its answer with a headline, which `/catchup` shows as what it found. Drawing, the headline line, the return card and `/catchup` run locally and use no model tokens. A compaction's summarizer reads a few more lines: the decisions, blockers and questions it is asked to keep.
 
 ## Forms
 

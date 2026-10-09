@@ -15,7 +15,7 @@ import type { AgentNote, Now } from './contract'
 // Everything the model pays for is this section (cached with the system
 // prompt) plus the few dozen tokens of each ```viz block it writes.
 // Rendering, the headline band and /catchup are drawn here: no model tokens.
-const GUIDE = `Visual companions: when a message reports a finding, result, decision, blocker or change of direction the user needs to re-orient, open it with one \`\`\`viz block; it is drawn as a visual. Skip it for routine or short replies. At most one per message, ≤8 lines.
+const GUIDE = `Visual companions: when a message reports a finding, result, decision, blocker or change of direction the user needs to re-orient, open it with one \`\`\`viz block; it is drawn as a visual. Skip it for routine or short replies. At most one per message, ≤8 lines. The prose after it adds only what the visual can't show: don't restate it.
 First line: <form> <headline as a claim>. Forms: flow (progress through steps), path (where in a system something happens: components in order), tree (causes or plan; indent 2 spaces per level), delta (what changed), bars (comparison), tradeoff (a choice on two axes), matrix (options against several criteria), claims (what the evidence says).
 flow/path/tree item marks: + done, * active, x blocked (stuck until something changes), . todo, - dropped or ruled out. A gap or a "no" in an analysis is not blocked: mark it - or add a note. Keep flow step labels ≤14 chars. "label | note" adds a note.
 delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>" (required), rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen). claims rows "claim: 0.8 ^ !" (confidence 0..1; ^ rising, v falling, ! contested).
@@ -72,10 +72,15 @@ export const register: Register = (on, options) => {
   // schedules and peers submit too, but don't mean you saw anything.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
-      const id = await $.session.id()
-      const at = await $.clock.now()
-      await $.store.set(`p:${id}`, at)
-      if (held.cache?.id === id) held.cache.seen = at
+      // Off the prompt's path: the note runs before any the turn queues, and before Haiku's goal (which reads `at`).
+      let at = 0
+      note(async () => {
+        const id = await $.session.id()
+        at = await $.clock.now()
+        await $.store.set(`p:${id}`, at)
+        if (held.cache?.id === id) held.cache.seen = at
+        $.ui.invalidate('ui.render') // a question you just answered leaves the band
+      })
       // You've seen where things stand: the thrash alarm counts afresh from here.
       fails.clear()
       edits.clear()
@@ -84,7 +89,7 @@ export const register: Register = (on, options) => {
       const turn = ++prompts
       if (goal) note(() => $.state.set(NOW, { goal }))
       // Haiku can answer after the turn has ended: the visuals saved since this prompt take its goal then.
-      else void nameGoal($, e.text, said).then(g => { if (g && turn === prompts) note(async () => { await merge($, { goal: g }); await regoal($, held, at, g) }) })
+      else void nameGoal($, e.text, said).then(g => { if (g && turn === prompts) note(async () => { await merge($, { goal: g }); if (at) await regoal($, held, at, g) }) })
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // never let bookkeeping block a prompt
@@ -404,26 +409,29 @@ export const register: Register = (on, options) => {
       turnTools = 0
       turnFiles = new Set()
       const spec = e.answer.includes('```viz') ? split(e.answer).flatMap(p => ('viz' in p ? [p.viz] : [])).at(-1) : undefined
-      const h = await history($, held)
-      await notes // the goal a prompt or skill named this turn is written by now (or regoal fills it in later)
-      const goal = activity ? ((await $.state.get(NOW)).value?.goal ?? undefined) : undefined
-      const at = await $.clock.now()
-      let entry: Saved | undefined
-      if (spec) {
-        const saved = h.saved
-        entry = { at, title: spec.title, mood: mood(spec).glyph, spec, ...(goal ? { goal } : {}) }
-        const stuck = entry.mood === '✓' ? stuckSince(saved.filter(s => s.goal === goal)) : undefined
-        if (stuck !== undefined) entry.stuck = entry.at - stuck
-        h.saved = [...saved, entry].slice(-keep)
-        await $.store.set(`h:${h.id}`, h.saved)
-      }
-      // The turn's record for the return card; a failure here costs the record, never the turn.
-      try {
-        const turn: Turn = { at, tools, ms: e.durationMs, ...(entry ? { mood: entry.mood } : {}), ...(goal ? { goal } : {}), ...(files.length ? { files } : {}) }
-        h.turns = [...h.turns, turn].slice(-TURNS)
-        await $.store.set(`t:${h.id}`, h.turns)
-      } catch {}
-      $.ui.invalidate('ui.render')
+      // Saved off the turn's path, after the notes queued before it: the goal a prompt or skill named this turn
+      // is written by then (or regoal fills it in later). Swallows its own failures, as every note does.
+      note(async () => {
+        const h = await history($, held)
+        const goal = activity ? ((await $.state.get(NOW)).value?.goal ?? undefined) : undefined
+        const at = await $.clock.now()
+        let entry: Saved | undefined
+        if (spec) {
+          const saved = h.saved
+          entry = { at, title: spec.title, mood: mood(spec).glyph, spec, ...(goal ? { goal } : {}) }
+          const stuck = entry.mood === '✓' ? stuckSince(saved.filter(s => s.goal === goal)) : undefined
+          if (stuck !== undefined) entry.stuck = entry.at - stuck
+          h.saved = [...saved, entry].slice(-keep)
+          await $.store.set(`h:${h.id}`, h.saved)
+        }
+        // The turn's record for the return card; a failure here costs the record, never the visual.
+        try {
+          const turn: Turn = { at, tools, ms: e.durationMs, ...(entry ? { mood: entry.mood } : {}), ...(goal ? { goal } : {}), ...(files.length ? { files } : {}) }
+          h.turns = [...h.turns, turn].slice(-TURNS)
+          await $.store.set(`t:${h.id}`, h.turns)
+        } catch {}
+        $.ui.invalidate('ui.render')
+      })
     }
     return next(e)
   })
@@ -433,6 +441,7 @@ export const register: Register = (on, options) => {
   // transcript and a card in /catchup. No model tokens: the summarizer reads a few lines more.
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
+    await notes // the last turn's visual is saved by now
     const h = await history($, held)
     const kept = keepOf(h.saved, h.seen)
     // A rewrite needs the transcript it runs over; without one the compaction goes ahead as asked.
