@@ -121,7 +121,7 @@ A fence whose first word is not a known form is left as a normal code block.
 
 <p align="center"><img src="docs/art/living.svg" alt="A living tree visual redrawn from v1 to v3, each version listing what changed since the last." width="100%"></p>
 
-A visual with `@ id=<name>` is one the agent keeps updating as the work moves: a plan, a hypothesis tree, a board. Each redraw with the same id is a new version. The title shows the version, and a list under the body says what changed since the previous one. Rows are matched by label, or by most of their words when the agent rewords one, so rewording doesn't show as a row removed and another added.
+A living visual is one the agent keeps updating as the work moves: a plan, a hypothesis tree, a board. A redraw joins the visual it redraws without being told to, as long as it is one of the last six visuals and the two have the same form and options, keep half their rows, and keep either two rows word for word or a similar headline. `@ id=<name>` links redraws that change more than that. Each redraw is a new version. The title shows the version, and a list under the body says what changed since the previous one. Rows are matched by label, or by most of their words when the agent rewords one, so rewording doesn't show as a row removed and another added.
 
 ```
 ╭─ Safari login failure  v4
@@ -181,6 +181,13 @@ The images in this README are drawn by the plugin's own renderer. `bun docs/art/
 Loading the plugin generates `.claude-plugin/types/`, which `tsconfig.json` extends. After that, `tsc -p . --noEmit` type-checks the plugin.
 
 ## Changelog
+
+### 0.4.0
+
+- A visual redrawn without `@ id=` links to the one it redraws and shows what changed. To link, the two need the same form and options, half their rows kept, and either two rows word for word or a similar headline.
+- The guide asks for flow rows that are outcomes, not routine steps.
+- A note a little too long for its row stays on the row, cut, instead of taking a line below.
+- Flow notes line up when the longest label has a note.
 
 ### 0.3.1
 

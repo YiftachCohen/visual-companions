@@ -3,11 +3,11 @@ import { expect, test } from 'claude-code/testing'
 import { big, booMood, cells, COLOR as BOO, FRAMES, frameAt } from './boo'
 import { flockCells, flockWidth, MAX_PUPS, pupOf } from './boo-flock'
 import { small, smallCells } from './boo-small'
-import { change, changes, coverage, cutWords, draw, MIN_WIDTH, mood, parse, plain, split, w } from './render'
+import { change, changes, continues, coverage, cutWords, draw, MIN_WIDTH, mood, parse, plain, split, w } from './render'
 import { svg } from './svg'
 import { card, checkpointCard, clashText, collisions, crowded, keepInstructions, lanes, noticeText, place, spinning } from './land'
 import type { Checkpoint } from './land'
-import { byGoal, goalOf, goalReply, headline, inTranscript, keepOf, lastAt, outcome, sinceSeen, skillGoal, stepOf, waiting } from './register'
+import { byGoal, goalOf, goalReply, headline, inTranscript, keepOf, lastAt, link, outcome, sinceSeen, skillGoal, stepOf, waiting } from './register'
 
 /** Lets the plugin's background notes run: a turn's visual is saved off the turn's path. */
 const settle = () => new Promise(r => (globalThis as any).setTimeout(r, 10))
@@ -1234,6 +1234,42 @@ test("a transcript visual is compared with the version before it; /catchup's wit
   // You typed after v3 (or before v1): with the version before it.
   expect(sinceSeen(saved, saved[2], 400)?.base?.version).toBe(2)
   expect(sinceSeen(saved, saved[2], 0)?.base?.version).toBe(2)
+})
+
+const P1 = 'flow Screenshot import: half built\n+ Reader\n+ Review/apply\n* Test scripts\n. Review screen\n. Docs'
+const P2 = 'flow Screenshot import: review screen built\n+ Reader\n+ Review/apply\n* Test scripts\n+ Review screen\n. Docs'
+const P3 = 'flow Screenshot import: built, waiting on you\n+ Reader + checks\n+ Review screen\n+ Test scripts + skill\n* Your screenshots\n. Pick model\n. PR'
+
+test('a redraw without an id continues the latest visual of its form', () => {
+  expect(continues(parse(P1)!, parse(P2)!)).toBe(true)
+  // Reworded rows still pair: 3 of 6 kept.
+  expect(continues(parse(P2)!, parse(P3)!)).toBe(true)
+  // Another form, or too few rows to tell, never does.
+  expect(continues(parse(P1)!, parse(P1.replace('flow', 'path'))!)).toBe(false)
+  expect(continues(parse('flow A\n+ one\n+ two')!, parse('flow B\n+ one\n+ two')!)).toBe(false)
+  expect(continues(parse(P1)!, parse(FLOW)!)).toBe(false)
+  // Generic rows alone don't join two reports: one row kept word for word and an unrelated headline.
+  expect(continues(parse('flow The evidence board works live\n+ claims form\n+ 90 tests pass\n+ live research\n. commit')!,
+    parse('flow The Boo flock is built\n+ pups\n+ 96 tests pass\n+ live: 3 agents\n. commit')!)).toBe(false)
+  // A chart in another unit is another chart.
+  expect(continues(parse('bars Read rate\n@ unit=%\na: 1\nb: 2\nc: 3')!, parse('bars Read rate\n@ unit=s\na: 1\nb: 2\nc: 3')!)).toBe(false)
+})
+
+test('link gives a redraw and the visual it redraws one id, and leaves saved ones as saved', () => {
+  const saved = [at(100, P1), at(150, FLOW)]
+  const r = link(saved, parse(P2)!)
+  expect(r.spec.opts.id).toBe('~100')
+  expect(r.saved[0].spec.opts.id).toBe('~100')
+  expect(r.saved[1]).toBe(saved[1])
+  // Saved, the earlier one draws as v1 and the redraw as v2 against it.
+  const after = [...r.saved, { ...at(200, P2), spec: r.spec }]
+  expect(link(after, parse(P1)!).spec.opts.id).toBe('~100')
+  expect(inTranscript(after, link(after, parse(P2)!).spec)).toEqual({ version: 2, base: { version: 1, spec: after[0].spec } })
+  // The next redraw joins the same chain.
+  expect(link(after, parse(P3)!).spec.opts.id).toBe('~100')
+  // An explicit id is kept; an unrelated visual stays unlinked.
+  expect(link(after, parse(V1)!).spec.opts.id).toBe('safari')
+  expect(link(after, parse(FLOW)!).spec.opts.id).toBe(undefined)
 })
 
 test('a redrawn visual in the transcript shows what changed since its last version', async ($, on) => {

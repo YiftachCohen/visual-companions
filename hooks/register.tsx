@@ -7,7 +7,7 @@ import type { Pup } from './boo-flock'
 import { small } from './boo-small'
 import { card, checkpointCard, clashText, CLASH_WINDOW, collisions, commandKey, crowded, cutsOf, keepInstructions, lanes, noticeText, span, spinning, tokens, turnsOf } from './land'
 import type { Checkpoint, Edits, Kept, Lane, Peer, Turn } from './land'
-import { cut, cutWords, draw, mood, plain, split, w } from './render'
+import { continues, cut, cutWords, draw, mood, plain, split, w } from './render'
 import { svg } from './svg'
 import type { Line, Living, Spec, Tone } from './render'
 import type { AgentNote, Now } from './contract'
@@ -17,10 +17,10 @@ import type { AgentNote, Now } from './contract'
 // Rendering, the headline band and /catchup are drawn here: no model tokens.
 const GUIDE = `Visual companions: when a message reports a finding, result, decision, blocker or change of direction the user needs to re-orient, open it with one \`\`\`viz block; it is drawn as a visual. Skip it for routine or short replies. At most one per message, ≤8 lines. The prose after it adds only what the visual can't show: don't restate it.
 First line: <form> <headline as a claim>. Forms: flow (progress through steps), path (where in a system something happens: components in order), tree (causes or plan; indent 2 spaces per level), delta (what changed), bars (comparison), tradeoff (a choice on two axes), matrix (options against several criteria), claims (what the evidence says).
-flow/path/tree item marks: + done, * active, x blocked (stuck until something changes), . todo, - dropped or ruled out. A gap or a "no" in an analysis is not blocked: mark it - or add a note. Keep flow step labels ≤14 chars. "label | note" adds a note.
+flow/path/tree item marks: + done, * active, x blocked (stuck until something changes), . todo, - dropped or ruled out. A gap or a "no" in an analysis is not blocked: mark it - or add a note. Keep flow step labels ≤14 chars. Rows are outcomes the user cares about, not routine steps. "label | note" adds a short note.
 delta rows: "label: before -> after +" (+ better, - worse). bars rows: "label: 89 *" (* highlights), options "@ unit=%; max=100; bar=85". tradeoff: "@ x=<axis>; y=<axis>", rows "label: 0.5 0.7 *" (0..1, * chosen). matrix: "@ cols=<a>, <b>" (required), rows "label: + ~ x *" (+ good, ~ partial, x bad, * chosen). claims rows "claim: 0.8 ^ !" (confidence 0..1; ^ rising, v falling, ! contested).
 "> one line" ends it: why it matters or what's next. "> ? question" instead when you need the user's decision or answer to go on.
-"@ id=<name>" on a visual you will update as the work moves (a plan, a hypothesis tree, a board): redraw it with the same id and the same row labels, and the user sees what changed.`
+To update a visual as the work moves (a plan, a hypothesis tree, a board), redraw it with the same row labels and the user sees what changed; "@ id=<name>" links redraws whose rows change a lot.`
 
 // Added to each subagent's task while `activity` is on: ~20 tokens per spawn.
 const HEADLINE = 'Start your final answer with a one-line headline that states the outcome as a claim.'
@@ -375,13 +375,13 @@ export const register: Register = (on, options) => {
     const prose = parts.flatMap(p => ('md' in p ? [p.md] : [])).join('').trim()
     const cols = (e.viewport?.columns ?? 80) - 2
     const { Box } = $.ui.resolve(e)
-    // A living visual (`@ id=`) shows its version and what changed since the one before it.
-    const hist = specs.some(s => s.opts.id) ? (await history($, held)).saved : []
+    // A living visual (`@ id=`, or a redraw of a recent one) shows its version and what changed since the one before it.
+    const hist = await history($, held).then(h => h.saved, () => [] as Saved[])
     const rest = prose ? await next({ ...e, props: { ...e.props, text: prose } }) : null
     return (
       <Box flexDirection="column">
         <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
-          {specs.map((s, k) => visual($.ui.resolve(e), draw(s, cols, inTranscript(hist, s)), k, e.surface === 'mobile' ? { cols } : undefined))}
+          {specs.map((s, k) => visual($.ui.resolve(e), draw(s, cols, inTranscript(hist, link(hist, s).spec)), k, e.surface === 'mobile' ? { cols } : undefined))}
         </Box>
         {rest}
       </Box>
@@ -417,8 +417,8 @@ export const register: Register = (on, options) => {
         const at = await $.clock.now()
         let entry: Saved | undefined
         if (spec) {
-          const saved = h.saved
-          entry = { at, title: spec.title, mood: mood(spec).glyph, spec, ...(goal ? { goal } : {}) }
+          const { spec: linked, saved } = link(h.saved, spec)
+          entry = { at, title: spec.title, mood: mood(spec).glyph, spec: linked, ...(goal ? { goal } : {}) }
           const stuck = entry.mood === '✓' ? stuckSince(saved.filter(s => s.goal === goal)) : undefined
           if (stuck !== undefined) entry.stuck = entry.at - stuck
           h.saved = [...saved, entry].slice(-keep)
@@ -815,6 +815,23 @@ export function versions(saved: Saved[], id: string | undefined): Saved[] {
 }
 
 const sameSpec = (a: Spec, b: Spec) => JSON.stringify(a) === JSON.stringify(b)
+const withId = (spec: Spec, id: string): Spec => ({ ...spec, opts: { ...spec.opts, id } })
+const LINK_BACK = 6 // how many saved visuals back a redraw without an id may continue
+
+/**
+ * A visual's id in its chain of versions. `@ id=` names it; without one, a visual that redraws one of the last few
+ * (`continues`) joins that visual's chain, and the earlier one takes the chain's id too.
+ * One already saved returns as saved, so the transcript draws what the save decided.
+ */
+export function link(saved: Saved[], spec: Spec): { spec: Spec; saved: Saved[] } {
+  if (spec.opts.id) return { spec, saved }
+  const was = saved.findLast(s => { const { id, ...opts } = s.spec.opts; return (!id || id.startsWith('~')) && sameSpec({ ...s.spec, opts }, spec) })
+  if (was) return { spec: was.spec, saved }
+  const prev = saved.slice(-LINK_BACK).findLast(s => continues(s.spec, spec))
+  if (!prev) return { spec, saved }
+  const id = prev.spec.opts.id ?? `~${prev.at}`
+  return { spec: withId(spec, id), saved: prev.spec.opts.id ? saved : saved.map(s => (s === prev ? { ...s, spec: withId(s.spec, id) } : s)) }
+}
 
 /** A transcript visual's place among its versions: the saved one it is (or, still streaming, the next), compared with the one before. */
 export function inTranscript(saved: Saved[], spec: Spec): Living | undefined {

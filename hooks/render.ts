@@ -191,11 +191,14 @@ export function cutWords(s: string, n: number): string {
   return (k > c.length / 2 ? c.slice(0, k).trimEnd() : c) + '…'
 }
 
-/** `left ···· note` aligned on `col`; a note that won't fit goes on its own line below, after `under`. */
+const INLINE_NOTE = 0.8 // a note a little too long stays on its row, cut, while this share of it shows; else it goes below
+
+/** `left ···· note` aligned on `col`, cut to the row when only its end is lost; else on its own line below, after `under`. */
 function leader(left: Line, note: string, col: number, room: number, under: Line = [sp(Math.min(4, lineW(left)))]): Line[] {
   const lw = lineW(left)
   const dots = Math.max(2, col - lw - 1)
-  if (lw + dots + 2 + w(note) <= room) return [[...left, { t: ' ' + '·'.repeat(dots) + ' ', tone: 'dim' }, { t: note }]]
+  const fits = room - lw - dots - 2
+  if (fits >= w(note) || (fits >= 12 && fits >= w(note) * INLINE_NOTE)) return [[...left, { t: ' ' + '·'.repeat(dots) + ' ', tone: 'dim' }, { t: cut(note, fits) }]]
   return [left, [...under, { t: cut(note, room - lineW(under)), tone: 'dim' }]]
 }
 
@@ -237,7 +240,7 @@ function flow(s: Spec, room: number): Line[] {
     const out: Line[] = [track, names]
     const withNotes = it.filter(i => i.note)
     if (withNotes.length) {
-      const col = Math.max(...withNotes.map(i => w(i.label))) + 4
+      const col = Math.max(...withNotes.map(i => w(i.label))) + 5 // mark, space, label, two dots: the longest still lines up
       out.push([], ...withNotes.flatMap(i => leader([mark(i.status), { t: ' ' + i.label }], i.note!, col, room)))
     }
     return out
@@ -627,6 +630,21 @@ export function changes(prev: Spec, cur: Spec): Change[] {
   const kept = new Set(match.values())
   for (const p of prev.items) if (!kept.has(p)) out.push({ kind: 'removed', label: STATUS_FORMS.has(prev.form) ? p.label : keyOf(prev.form, p).key })
   return out
+}
+
+/**
+ * Whether `cur` redraws `prev` without saying so: the same form and options (a chart's unit), half the rows of the
+ * longer one kept (reworded rows count), and either two rows kept word for word or a headline much like the last one.
+ * Generic rows ("tests pass", "commit") alone don't make two reports one visual.
+ */
+export function continues(prev: Spec, cur: Spec): boolean {
+  if (prev.form !== cur.form || Math.min(prev.items.length, cur.items.length) < 3) return false
+  const { id: _a, ...was } = prev.opts, { id: _b, ...is } = cur.opts
+  if (JSON.stringify(was) !== JSON.stringify(is)) return false
+  const match = pair(prev, cur)
+  if (match.size / Math.max(prev.items.length, cur.items.length) < 0.5) return false
+  const exact = [...match].filter(([i, p]) => keyOf(cur.form, i).key === keyOf(prev.form, p).key).length
+  return exact >= 2 || alike(prev.title, cur.title) >= 0.5
 }
 
 /** A visual's place among its versions: which it is, and the one it is compared with. */
